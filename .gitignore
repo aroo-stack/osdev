@@ -1,0 +1,5 @@
+# build artifacts - do not commit
+*.o
+kernel.bin
+os.iso
+isodir/
