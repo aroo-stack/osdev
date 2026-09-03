@@ -8,6 +8,7 @@
 #include "heap.h"
 #include "framebuffer.h"
 #include "graphics.h"
+#include "mouse.h"
 
 static inline void outb(uint16_t port, uint8_t val) {
     __asm__ volatile ("outb %0, %1" : : "a"(val), "Nd"(port));
@@ -253,6 +254,11 @@ void kernel_main(uint32_t magic, uint32_t mbi_addr) {
     } else {
         serial_puts("GFX: skipped - no framebuffer\n");
     }
+
+    // Phase 9: PS/2 mouse + cursor
+    serial_puts("MOUSE: init (IRQ12 vector 44)...\n");
+    mouse_init();
+    serial_puts("MOUSE: ready - move mouse over QEMU window and click\n");
 
     __asm__ volatile ("sti");
 

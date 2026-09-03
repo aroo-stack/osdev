@@ -92,6 +92,14 @@ void fb_put_pixel(uint32_t x, uint32_t y, uint32_t color){
     *pixel = color;
 }
 
+uint32_t fb_get_pixel(uint32_t x, uint32_t y){
+    if(!fb_available) return 0;
+    if(x >= fb_width || y >= fb_height) return 0;
+    uint8_t *row = (uint8_t*)fb_addr + y * fb_pitch;
+    uint32_t *pixel = (uint32_t*)(row + x*4);
+    return *pixel;
+}
+
 void fb_fill(uint32_t color){
     if(!fb_available) return;
     for(uint32_t y=0;y<fb_height;y++){

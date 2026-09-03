@@ -38,8 +38,11 @@ framebuffer.o: framebuffer.c framebuffer.h multiboot.h
 graphics.o: graphics.c graphics.h font.h framebuffer.h
 	$(CC) $(CFLAGS) -c graphics.c -o graphics.o
 
-kernel.bin: boot.o kernel.o gdt.o gdt_flush.o idt.o isr.o pmm.o paging.o heap.o framebuffer.o graphics.o linker.ld
-	ld $(LDFLAGS) -o kernel.bin boot.o kernel.o gdt.o gdt_flush.o idt.o isr.o pmm.o paging.o heap.o framebuffer.o graphics.o
+mouse.o: mouse.c mouse.h framebuffer.h
+	$(CC) $(CFLAGS) -c mouse.c -o mouse.o
+
+kernel.bin: boot.o kernel.o gdt.o gdt_flush.o idt.o isr.o pmm.o paging.o heap.o framebuffer.o graphics.o mouse.o linker.ld
+	ld $(LDFLAGS) -o kernel.bin boot.o kernel.o gdt.o gdt_flush.o idt.o isr.o pmm.o paging.o heap.o framebuffer.o graphics.o mouse.o
 
 os.iso: kernel.bin
 	mkdir -p isodir/boot/grub

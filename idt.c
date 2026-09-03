@@ -1,4 +1,5 @@
 #include "idt.h"
+#include "mouse.h"
 #include <stdint.h>
 #include <stddef.h>
 
@@ -170,23 +171,31 @@ void isr_handler(struct regs *r) {
 }
 
 void irq_handler(struct regs *r) {
-    // send EOI
-    if (r->int_no >= 40) outb(0xA0, 0x20);
-    outb(0x20, 0x20);
-
-    if (r->int_no == 33) { // IRQ1 keyboard
+    if (r->int_no == 33) { // IRQ1 keyboard - vector 33 = 0x20+1
         uint8_t scancode = inb(0x60);
+        outb(0x20, 0x20);
+        // Filter spurious ACK 0xFA/0xFE that can leak from mouse enable (observed headless: 0xFA delivered via IRQ1 after 0xF4)
+        // These are not real key presses; ignore to avoid confusion with mouse
+        if(scancode==0xFA || scancode==0xFE) return;
         serial_puts("KEY scancode=");
         serial_put_dec(scancode);
         serial_puts(" hex=");
         serial_put_hex(scancode);
         serial_puts("\n");
-    } else if (r->int_no == 32) {
-        // timer - ignore but already EOI
+    } else if (r->int_no == 44) { // IRQ12 mouse - vector 44 = 0x20+12 = 0x28+4 = 44 (0x2C) - arithmetic confirmed
+        uint8_t data = inb(0x60);
+        outb(0xA0, 0x20);
+        outb(0x20, 0x20);
+        mouse_handle_byte(data);
     } else {
-        // other IRQ
-        serial_puts("IRQ ");
-        serial_put_dec(r->int_no - 32);
-        serial_puts(" fired\n");
+        if (r->int_no >= 40) outb(0xA0, 0x20);
+        outb(0x20, 0x20);
+        if (r->int_no == 32) {
+            // timer - ignore
+        } else {
+            serial_puts("IRQ ");
+            serial_put_dec(r->int_no - 32);
+            serial_puts(" fired\n");
+        }
     }
 }
