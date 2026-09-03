@@ -173,34 +173,47 @@ void mouse_handle_byte(uint8_t data){
         s_puts("\n");
 
         int left_pressed = (buttons & 0x01) && !(prev_buttons & 0x01);
+        int left_released = !(buttons & 0x01) && (prev_buttons & 0x01);
         int moved = (new_x != mouse_x || new_y != mouse_y);
 
-        if(left_pressed){
-            // click-to-focus: update position first so window check uses new position
-            int did_redraw = 0;
-            __asm__ volatile("cli");
-            mouse_x = new_x;
-            mouse_y = new_y;
-            if(fb_is_available()){
-                did_redraw = window_handle_click(new_x, new_y);
+        // Phase 11: dragging - handled before click-to-focus
+        if(window_is_dragging()){
+            if(left_released){
+                __asm__ volatile("cli");
+                window_end_drag();
+                if(moved && fb_is_available()){
+                    cursor_restore();
+                    mouse_x = new_x; mouse_y = new_y;
+                    cursor_draw(mouse_x, mouse_y);
+                } else {
+                    mouse_x = new_x; mouse_y = new_y;
+                }
+                __asm__ volatile("sti");
+            } else if(moved){
+                __asm__ volatile("cli");
+                mouse_x = new_x; mouse_y = new_y;
+                window_update_drag(new_x, new_y);
+                __asm__ volatile("sti");
+            } else {
+                mouse_x = new_x; mouse_y = new_y;
             }
-            // If window_handle_click did a full redraw, it already handled cursor (restore+draw at new pos)
-            // If it did not redraw (desktop or already front), we still need to handle movement for this packet
-            if(!did_redraw && moved && fb_is_available()){
-                // cursor was at old position, need to move to new
-                // Note: mouse_x already new, but cursor_save is still at old position (from previous draw)
-                // So restore old, then draw at new (which is already mouse_x)
-                // However window_handle_click for desktop didn't touch cursor, so saved buffer still valid for old pos
-                // We need to restore old and draw new, but we already updated mouse_x, so we need old position
-                // For this case, we should have saved old position before updating, but we already updated.
-                // To handle correctly, we need to restore using old saved position, which is still old_x,old_y
-                // Since we updated mouse_x, the cursor_draw will save new position, so we need to restore old first
-                // But we already invalidated? No, for did_redraw==0 we didn't invalidate, so saved is still old
-                cursor_restore();
-                cursor_draw(new_x, new_y);
-                // mouse_x already new, no need to update again
-            } else if(!did_redraw){
-                // no move and no window, just update position (already done)
+        } else if(left_pressed){
+            __asm__ volatile("cli");
+            mouse_x = new_x; mouse_y = new_y;
+            int is_title = 0;
+            int hit = window_find_at(new_x, new_y);
+            if(hit != -1) is_title = window_is_in_title_bar(hit, new_x, new_y);
+            if(is_title){
+                window_start_drag(new_x, new_y);
+            } else {
+                int did_redraw = 0;
+                if(fb_is_available()){
+                    did_redraw = window_handle_click(new_x, new_y);
+                }
+                if(!did_redraw && moved && fb_is_available()){
+                    cursor_restore();
+                    cursor_draw(new_x, new_y);
+                }
             }
             __asm__ volatile("sti");
         } else if(moved && fb_is_available()){

@@ -165,3 +165,77 @@ void window_get_info(int idx, int *x, int *y, int *w, int *h){
     if(w) *w=windows[idx].w;
     if(h) *h=windows[idx].h;
 }
+
+// --- Phase 11: dragging ---
+static int dragging = 0;
+static int drag_win = -1;
+static int drag_off_x = 0, drag_off_y = 0;
+
+int window_is_in_title_bar(int idx, int x, int y){
+    if(idx<0||idx>=window_count) return 0;
+    struct window *w = &windows[idx];
+    return (x >= w->x && x < w->x + w->w && y >= w->y && y < w->y + TITLE_BAR_H);
+}
+
+int window_is_dragging(void){ return dragging; }
+
+int window_start_drag(int x, int y){
+    int idx = window_find_at(x,y);
+    if(idx==-1) return 0;
+    if(!window_is_in_title_bar(idx,x,y)) return 0;
+    // Bring to front first (if not already) - this does full redraw with cursor handling
+    // But we need offset before bringing to front? Offset should be based on window pos before bring to front (pos doesn't change on bring to front, only z)
+    struct window *w = &windows[idx];
+    drag_off_x = x - w->x;
+    drag_off_y = y - w->y;
+    drag_win = idx;
+    dragging = 1;
+    s_puts("WM: drag start Window "); s_put_dec(idx+1); s_puts(" offset "); s_put_dec(drag_off_x); s_putc(','); s_put_dec(drag_off_y); s_puts("\n");
+    // Ensure window is front - this will do full redraw and cursor draw at current pos
+    window_bring_to_front(idx);
+    return 1;
+}
+
+void window_update_drag(int x, int y){
+    if(!dragging || drag_win==-1) return;
+    struct window *w = &windows[drag_win];
+    int new_x = x - drag_off_x;
+    int new_y = y - drag_off_y;
+
+    // Bounds: allow partially off-screen but keep title bar visible so it can be dragged back
+    // Chosen: keep at least 60px of width visible and title bar 20px visible
+    // So x in [-w+60, width-60], y in [0, height - TITLE_BAR_H]
+    // Alternative fully on-screen would be 0..width-w, 0..height-h - we chose partially for usability
+    int min_x = -w->w + 60;
+    int max_x = (int)fb_get_width() - 60;
+    int min_y = 0;
+    int max_y = (int)fb_get_height() - TITLE_BAR_H;
+    if(new_x < min_x) new_x = min_x;
+    if(new_x > max_x) new_x = max_x;
+    if(new_y < min_y) new_y = min_y;
+    if(new_y > max_y) new_y = max_y;
+
+    if(new_x == w->x && new_y == w->y) return; // no move
+
+    // Redraw strategy for dragging: full screen redraw each move
+    // Why full redraw vs incremental (only erase old window rect and draw new)?
+    // Full redraw is simplest and guarantees correct z-order overlap for all windows.
+    // Incremental would need to handle clipping where dragged window overlaps others, and where
+    // other windows become exposed when dragged window moves away - complex to get right without artifacts.
+    // With only 3 windows at 1024x768, full redraw is ~3MB fill + 3*~120K windows = ~3.4M pixels per move.
+    // At 60-100Hz mouse moves, that's ~200-340M pixels/sec, well within QEMU's ~1GB/sec, no flicker on modern host.
+    // So we choose full redraw each drag move for correctness over micro-optimization.
+    mouse_cursor_restore();
+    mouse_cursor_invalidate();
+    w->x = new_x;
+    w->y = new_y;
+    window_manager_draw_all();
+    mouse_cursor_draw_current();
+}
+
+void window_end_drag(void){
+    if(!dragging) return;
+    s_puts("WM: drag end Window "); s_put_dec(drag_win+1); s_puts("\n");
+    dragging = 0;
+    drag_win = -1;
+}
