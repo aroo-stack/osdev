@@ -6,6 +6,8 @@
 #include "pmm.h"
 #include "paging.h"
 #include "heap.h"
+#include "framebuffer.h"
+#include "graphics.h"
 
 static inline void outb(uint16_t port, uint8_t val) {
     __asm__ volatile ("outb %0, %1" : : "a"(val), "Nd"(port));
@@ -82,7 +84,7 @@ void kernel_main(uint32_t magic, uint32_t mbi_addr) {
         serial_puts("\n");
         if(mbi->flags & (1<<6)){
             // mmap present
-            pmm_init(mbi->mmap_addr, mbi->mmap_length);
+            pmm_init(mbi_addr, mbi->mmap_addr, mbi->mmap_length);
         } else {
             serial_puts("MBI: no mmap flag!\n");
         }
@@ -202,6 +204,54 @@ void kernel_main(uint32_t magic, uint32_t mbi_addr) {
             heap_print_stats();
             if(ok && ok2) serial_puts("HEAP test: PASS\n"); else serial_puts("HEAP test: FAIL\n");
         }
+    }
+
+    // Phase 7: framebuffer - requires paging for high fb address mapping
+    {
+        struct multiboot_info *mbi2 = (struct multiboot_info*)mbi_addr;
+        if(mbi2 && (mbi2->flags & (1<<12))){
+            serial_puts("FB: attempting init...\n");
+            if(fb_init(mbi2)){
+                serial_puts("FB: init OK, drawing test pattern\n");
+                fb_fill(0x00112244); // dark blue background
+                fb_draw_rect(100, 100, 300, 200, 0x00FFFFFF); // white rectangle
+                fb_draw_rect(0, 0, fb_get_width(), 20, 0x00FF0000); // red top bar
+                // draw border - fixed: was only top/bottom 2px at screen edge (thin, easily clipped by display scaling)
+                // now full 4px border on all sides for visibility
+                fb_draw_rect(0, 0, fb_get_width(), 4, 0x00FF00FF);
+                fb_draw_rect(0, fb_get_height()-4, fb_get_width(), 4, 0x00FF00FF);
+                fb_draw_rect(0, 0, 4, fb_get_height(), 0x00FF00FF);
+                fb_draw_rect(fb_get_width()-4, 0, 4, fb_get_height(), 0x00FF00FF);
+                serial_puts("FB: test pattern drawn (border fixed to 4px all sides)\n");
+            } else {
+                serial_puts("FB: init failed, staying in VGA text mode\n");
+                vga_puts("FB fallback");
+            }
+        } else {
+            serial_puts("FB: not available from GRUB (flags bit12 clear), fallback VGA text\n");
+            vga_puts("FB fallback - no framebuffer");
+        }
+    }
+
+    // Phase 8: 2D primitives + text on framebuffer
+    if(fb_is_available()){
+        serial_puts("GFX: testing primitives...\n");
+        gfx_draw_line(0, 30, fb_get_width()-1, 30, 0x0000FF00); // horizontal green
+        gfx_draw_line(50, 50, 200, 300, 0x00FFFF00); // diagonal yellow
+        gfx_draw_line(300, 50, 150, 280, 0x00FF8000); // other diagonal orange
+        gfx_draw_rect_outline(450, 100, 200, 150, 0x0000FFFF); // cyan outline (unfilled)
+        gfx_draw_rect_outline(10, 400, 100, 80, 0x00FF00FF); // small magenta outline
+        gfx_draw_circle(512, 384, 80, 0x00FFFFFF); // white circle center
+        gfx_draw_circle(600, 500, 40, 0x0000FF00); // green circle
+        serial_puts("GFX: lines/rects/circles drawn\n");
+        gfx_draw_string(10, 40, "Hello, Framebuffer!", 0x00FFFFFF);
+        gfx_draw_string(10, 50, "Line, Rect, Circle, Text OK", 0x00FFFFFF);
+        gfx_draw_string(10, 60, "0123456789 ABCDEFG", 0x00FFFF00);
+        gfx_draw_string(450, 280, "Outline Rect 200x150", 0x0000FFFF);
+        serial_puts("GFX: text drawn\n");
+        serial_puts("GFX: Phase 8 OK\n");
+    } else {
+        serial_puts("GFX: skipped - no framebuffer\n");
     }
 
     __asm__ volatile ("sti");

@@ -32,14 +32,26 @@ paging.o: paging.c paging.h
 heap.o: heap.c heap.h
 	$(CC) $(CFLAGS) -c heap.c -o heap.o
 
-kernel.bin: boot.o kernel.o gdt.o gdt_flush.o idt.o isr.o pmm.o paging.o heap.o linker.ld
-	ld $(LDFLAGS) -o kernel.bin boot.o kernel.o gdt.o gdt_flush.o idt.o isr.o pmm.o paging.o heap.o
+framebuffer.o: framebuffer.c framebuffer.h multiboot.h
+	$(CC) $(CFLAGS) -c framebuffer.c -o framebuffer.o
+
+graphics.o: graphics.c graphics.h font.h framebuffer.h
+	$(CC) $(CFLAGS) -c graphics.c -o graphics.o
+
+kernel.bin: boot.o kernel.o gdt.o gdt_flush.o idt.o isr.o pmm.o paging.o heap.o framebuffer.o graphics.o linker.ld
+	ld $(LDFLAGS) -o kernel.bin boot.o kernel.o gdt.o gdt_flush.o idt.o isr.o pmm.o paging.o heap.o framebuffer.o graphics.o
 
 os.iso: kernel.bin
 	mkdir -p isodir/boot/grub
 	cp kernel.bin isodir/boot/kernel.bin
 	echo 'set timeout=0' > isodir/boot/grub/grub.cfg
 	echo 'set default=0' >> isodir/boot/grub/grub.cfg
+	echo 'insmod all_video' >> isodir/boot/grub/grub.cfg
+	echo 'insmod vbe' >> isodir/boot/grub/grub.cfg
+	echo 'insmod gfxterm' >> isodir/boot/grub/grub.cfg
+	echo 'set gfxmode=1024x768x32' >> isodir/boot/grub/grub.cfg
+	echo 'set gfxpayload=keep' >> isodir/boot/grub/grub.cfg
+	echo 'terminal_output gfxterm' >> isodir/boot/grub/grub.cfg
 	echo 'menuentry "MyOS" {' >> isodir/boot/grub/grub.cfg
 	echo '  multiboot /boot/kernel.bin' >> isodir/boot/grub/grub.cfg
 	echo '  boot' >> isodir/boot/grub/grub.cfg

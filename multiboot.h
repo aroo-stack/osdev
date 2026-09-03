@@ -36,6 +36,19 @@ struct multiboot_info {
     uint16_t vbe_interface_seg; // 0x52
     uint16_t vbe_interface_off; // 0x54
     uint16_t vbe_interface_len; // 0x56
+    // Framebuffer info - Multiboot spec amendment, only valid if flags & (1<<12)
+    // Trace: offset 0x58 (88) framebuffer_addr 64-bit (low then high)
+    //        0x60 (96) pitch 4B, 0x64 (100) width 4B, 0x68 (104) height 4B
+    //        0x6C (108) bpp 1B, 0x6D (109) type 1B, 0x6E (110) reserved + palette
+    uint32_t framebuffer_addr_low;  // 0x58
+    uint32_t framebuffer_addr_high; // 0x5C
+    uint32_t framebuffer_pitch;     // 0x60
+    uint32_t framebuffer_width;     // 0x64
+    uint32_t framebuffer_height;    // 0x68
+    uint8_t  framebuffer_bpp;       // 0x6C
+    uint8_t  framebuffer_type;      // 0x6D 0=indexed 1=RGB 2=EGA text
+    uint8_t  framebuffer_reserved;  // 0x6E
+    uint8_t  framebuffer_palette;   // 0x6F+ varies
 } __attribute__((packed));
 
 #define MULTIBOOT_BOOTLOADER_MAGIC 0x2BADB002

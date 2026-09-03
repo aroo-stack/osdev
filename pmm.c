@@ -41,7 +41,7 @@ static inline void bitmap_set(uint32_t frame){ bitmap[frame/32] |= (1u<<(frame%3
 static inline void bitmap_clear(uint32_t frame){ bitmap[frame/32] &= ~(1u<<(frame%32)); }
 static inline int bitmap_test(uint32_t frame){ return bitmap[frame/32] & (1u<<(frame%32)); }
 
-void pmm_init(uint32_t mmap_addr, uint32_t mmap_length) {
+void pmm_init(uint32_t mbi_addr, uint32_t mmap_addr, uint32_t mmap_length) {
     // mark all as used initially
     for(uint32_t i=0;i<BITMAP_U32;i++) bitmap[i]=0xFFFFFFFF;
     total_frames = 0; free_count=0;
@@ -100,6 +100,35 @@ void pmm_init(uint32_t mmap_addr, uint32_t mmap_length) {
 
     // ensure frame 0 is reserved (null)
     if(!bitmap_test(0)){ bitmap_set(0); if(free_count) free_count--; }
+
+    // reserve multiboot info and mmap buffer (at 0x10000) from being allocated to heap/framebuffer
+    // GRUB places mbi at 0x10000 and mmap buffer nearby; both lie in low available RAM and would otherwise be marked free
+    if(mbi_addr){
+        uint32_t mbi_frame = mbi_addr >> 12;
+        if(mbi_frame < MAX_FRAMES && !bitmap_test(mbi_frame)){
+            // already free -> mark used
+            bitmap_set(mbi_frame);
+            if(free_count) free_count--;
+            s_puts("PMM: reserved mbi frame "); s_put_dec(mbi_frame); s_puts(" (0x"); s_put_hex32(mbi_addr); s_puts(")\n");
+        } else if(mbi_frame < MAX_FRAMES){
+            // already used (e.g., kernel overlap) ensure used
+            bitmap_set(mbi_frame);
+        }
+        // also reserve mmap buffer pages
+        if(mmap_addr){
+            uint32_t mmap_start = mmap_addr >> 12;
+            uint32_t mmap_end = (mmap_addr + mmap_length + 0xFFF) >> 12;
+            for(uint32_t f=mmap_start; f<mmap_end && f < MAX_FRAMES; f++){
+                if(!bitmap_test(f)){
+                    bitmap_set(f);
+                    if(free_count) free_count--;
+                } else {
+                    bitmap_set(f);
+                }
+            }
+            s_puts("PMM: reserved mmap buffer frames "); s_put_dec(mmap_start); s_puts(".."); s_put_dec(mmap_end); s_puts("\n");
+        }
+    }
 
     total_frames = free_count;
 

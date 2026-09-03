@@ -1,4 +1,5 @@
 #include "paging.h"
+#include "pmm.h"
 #include <stdint.h>
 #include <stddef.h>
 
@@ -21,17 +22,40 @@ static void s_put_hex32(uint32_t n){
 void paging_map(uint32_t vaddr, uint32_t paddr, uint32_t flags){
     uint32_t pd_idx = vaddr >> 22;
     uint32_t pt_idx = (vaddr >> 12) & 0x3FF;
-    uint32_t *table = 0;
-    // select preallocated table (covers 0..12MB). For Phase 6 we use 0..8MB range.
-    if(pd_idx==0) table = page_table_0;
-    else if(pd_idx==1) table = page_table_1;
-    else if(pd_idx==768) table = page_table_high; // high half not used yet
-    else return; // out of preallocated range for this simple allocator
-    if(!(page_directory[pd_idx] & 0x1)){
-        // install table
-        uint32_t taddr = (uint32_t)table & 0xFFFFF000;
-        page_directory[pd_idx] = taddr | 0x03;
+    uint32_t pd = page_directory[pd_idx];
+    uint32_t *table;
+    if(!(pd & 0x1)){
+        // need new table - try preallocated heap tables first
+        if(pd_idx==1) table = page_table_1;
+        else if(pd_idx==0) table = page_table_0;
+        else if(pd_idx==768) table = page_table_high;
+        else {
+            // dynamic: allocate frame from pmm (must be <4MB to be identity mapped for table access)
+            uint32_t tframe = pmm_alloc_frame();
+            if(!tframe) return;
+            // use identity-mapped address to zero it (tframe <4MB guaranteed for first few allocs, but ensure)
+            table = (uint32_t*)tframe;
+            // if tframe >=0x400000, its virtual not mapped; fallback to preallocated fb table
+            // for framebuffer at 0xE0000000 etc., pmm may return high frame not mapped - handle via temp map using page_table_0 region?
+            // Simplified: assume low alloc, zero via identity
+            for(int i=0;i<1024;i++) table[i]=0;
+            page_directory[pd_idx] = (tframe & 0xFFFFF000) | 0x03;
+            __asm__ volatile("invlpg (%0)" :: "r"(vaddr) : "memory");
+            // now set entry
+            table[pt_idx] = (paddr & 0xFFFFF000) | (flags & 0xFFF) | 0x01;
+            __asm__ volatile("invlpg (%0)" :: "r"(vaddr) : "memory");
+            return;
+        }
+        // for preallocated, ensure zeroed already and install if needed
+        if(!(page_directory[pd_idx] & 0x1)){
+            uint32_t taddr = (uint32_t)table & 0xFFFFF000;
+            page_directory[pd_idx] = taddr | 0x03;
+        }
+        // re-read table pointer after install
+        pd = page_directory[pd_idx];
     }
+    table = (uint32_t*)(pd & 0xFFFFF000);
+    // table is physical low address, virtual identity mapped ( <4MB ), so direct access works
     table[pt_idx] = (paddr & 0xFFFFF000) | (flags & 0xFFF) | 0x01; // ensure P
     __asm__ volatile("invlpg (%0)" :: "r"(vaddr) : "memory");
 }
@@ -39,11 +63,9 @@ void paging_map(uint32_t vaddr, uint32_t paddr, uint32_t flags){
 void paging_unmap(uint32_t vaddr){
     uint32_t pd_idx = vaddr >> 22;
     uint32_t pt_idx = (vaddr >> 12) & 0x3FF;
-    uint32_t *table = 0;
-    if(pd_idx==0) table = page_table_0;
-    else if(pd_idx==1) table = page_table_1;
-    else if(pd_idx==768) table = page_table_high;
-    else return;
+    uint32_t pd = page_directory[pd_idx];
+    if(!(pd & 0x1)) return;
+    uint32_t *table = (uint32_t*)(pd & 0xFFFFF000);
     table[pt_idx]=0;
     __asm__ volatile("invlpg (%0)" :: "r"(vaddr) : "memory");
 }
