@@ -9,6 +9,7 @@
 #include "framebuffer.h"
 #include "graphics.h"
 #include "mouse.h"
+#include "window.h"
 
 static inline void outb(uint16_t port, uint8_t val) {
     __asm__ volatile ("outb %0, %1" : : "a"(val), "Nd"(port));
@@ -255,7 +256,12 @@ void kernel_main(uint32_t magic, uint32_t mbi_addr) {
         serial_puts("GFX: skipped - no framebuffer\n");
     }
 
-    // Phase 9: PS/2 mouse + cursor
+    // Phase 10: Window manager (before mouse cursor, so windows under cursor)
+    serial_puts("WM: init...\n");
+    window_manager_init();
+    serial_puts("WM: ready - 3 overlapping windows, click to focus\n");
+
+    // Phase 9: PS/2 mouse + cursor (after windows, so cursor on top)
     serial_puts("MOUSE: init (IRQ12 vector 44)...\n");
     mouse_init();
     serial_puts("MOUSE: ready - move mouse over QEMU window and click\n");

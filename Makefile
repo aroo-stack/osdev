@@ -41,8 +41,11 @@ graphics.o: graphics.c graphics.h font.h framebuffer.h
 mouse.o: mouse.c mouse.h framebuffer.h
 	$(CC) $(CFLAGS) -c mouse.c -o mouse.o
 
-kernel.bin: boot.o kernel.o gdt.o gdt_flush.o idt.o isr.o pmm.o paging.o heap.o framebuffer.o graphics.o mouse.o linker.ld
-	ld $(LDFLAGS) -o kernel.bin boot.o kernel.o gdt.o gdt_flush.o idt.o isr.o pmm.o paging.o heap.o framebuffer.o graphics.o mouse.o
+window.o: window.c window.h framebuffer.h graphics.h
+	$(CC) $(CFLAGS) -c window.c -o window.o
+
+kernel.bin: boot.o kernel.o gdt.o gdt_flush.o idt.o isr.o pmm.o paging.o heap.o framebuffer.o graphics.o mouse.o window.o linker.ld
+	ld $(LDFLAGS) -o kernel.bin boot.o kernel.o gdt.o gdt_flush.o idt.o isr.o pmm.o paging.o heap.o framebuffer.o graphics.o mouse.o window.o
 
 os.iso: kernel.bin
 	mkdir -p isodir/boot/grub
@@ -62,7 +65,10 @@ os.iso: kernel.bin
 	grub-mkrescue -o os.iso isodir
 
 run:
-	qemu-system-i386 -cdrom os.iso -nographic
+	qemu-system-i386 -cdrom os.iso -serial stdio -m 128
+
+run-headless:
+	qemu-system-i386 -cdrom os.iso -serial stdio -display none -vga std -monitor none -m 128
 
 clean:
 	rm -rf *.o kernel.bin os.iso isodir
