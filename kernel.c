@@ -362,8 +362,18 @@ void kernel_main(uint32_t magic, uint32_t mbi_addr) {
 
     // Main loop - GUI task 0
     int gui_tick = 0;
+    int taskman_tick = 0;
     for (;;) {
         window_tick_cursor();
+        // Task Manager live refresh - every ~20 iterations (~0.5s) to update tick counts without constant redraw
+        // Chosen over every loop (60Hz full redraw = 180MB/s) to keep responsiveness, vs every second would be too laggy to watch counts climb
+        if(++taskman_tick % 20 == 0){
+            extern struct window windows[];
+            extern int window_count;
+            if(window_count==4 && !windows[3].minimized && windows[3].visible){
+                g_needs_redraw = 1;
+            }
+        }
         if(window_needs_redraw()){
             window_do_redraw();
         }

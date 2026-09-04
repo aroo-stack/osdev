@@ -143,22 +143,40 @@ static void window_draw_minimize_button(struct window *w){
 static void window_draw_single(int idx){
     struct window *w = &windows[idx];
     if(!w->visible || w->minimized) return;
-    // filled background
     fb_draw_rect(w->x, w->y, w->w, w->h, w->bg_color);
-    // title bar
     fb_draw_rect(w->x, w->y, w->w, TITLE_BAR_H, w->title_color);
-    // border outline
     gfx_draw_rect_outline(w->x, w->y, w->w, w->h, w->border_color);
     gfx_draw_rect_outline(w->x, w->y, w->w, TITLE_BAR_H, w->border_color);
-    // title text - centered vertically in title bar (8px font, title bar 20px)
     gfx_draw_string(w->x+6, w->y+6, w->title, 0x00FFFFFF);
-    // minimize button - always on title bar top-right
     window_draw_minimize_button(w);
-    // button if any
     window_draw_button(w);
-    // textbox if any
     window_draw_textbox(w);
-    // resize handle - 12x12 at bottom-right, diagonal grip
+    if(idx==3 && window_count==4){
+        extern void pit_get_task_ticks(int *gui, int *a, int *b);
+        int gui=0,a=0,b=0;
+        pit_get_task_ticks(&gui,&a,&b);
+        char line1[32]; char line2[32]; char line3[32];
+        {
+            const char *pfx="GUI: "; int p=0; while(pfx[p]){ line1[p]=pfx[p]; p++; }
+            char tmp[12]; int t=0; int n=gui; if(n==0) tmp[t++]='0'; else { char rev[12]; int r=0; while(n){ rev[r++]='0'+n%10; n/=10; } while(r--) tmp[t++]=rev[r]; }
+            for(int i=0;i<t && p<31;i++) line1[p++]=tmp[i]; line1[p]=0;
+        }
+        {
+            const char *pfx="TaskA: "; int p=0; while(pfx[p]){ line2[p]=pfx[p]; p++; }
+            char tmp[12]; int t=0; int n=a; if(n==0) tmp[t++]='0'; else { char rev[12]; int r=0; while(n){ rev[r++]='0'+n%10; n/=10; } while(r--) tmp[t++]=rev[r]; }
+            for(int i=0;i<t && p<31;i++) line2[p++]=tmp[i]; line2[p]=0;
+        }
+        {
+            const char *pfx="TaskB: "; int p=0; while(pfx[p]){ line3[p]=pfx[p]; p++; }
+            char tmp[12]; int t=0; int n=b; if(n==0) tmp[t++]='0'; else { char rev[12]; int r=0; while(n){ rev[r++]='0'+n%10; n/=10; } while(r--) tmp[t++]=rev[r]; }
+            for(int i=0;i<t && p<31;i++) line3[p++]=tmp[i]; line3[p]=0;
+        }
+        int tx = w->x + 10;
+        int ty = w->y + 30;
+        gfx_draw_string(tx, ty, line1, 0x00000000);
+        gfx_draw_string(tx, ty+12, line2, 0x00000000);
+        gfx_draw_string(tx, ty+24, line3, 0x00000000);
+    }
     {
         int rx = w->x + w->w - RESIZE_HANDLE;
         int ry = w->y + w->h - RESIZE_HANDLE;
@@ -249,11 +267,21 @@ void window_manager_init(void){
     windows[2].z = 2;
     windows[2].has_button = 0;
 
-    window_count = 3;
-    // z_order 0..2 back->front corresponds to windows index order initially
+    windows[3].x = 600; windows[3].y = 100; windows[3].w = 300; windows[3].h = 200;
+    w_strcpy(windows[3].title, "Task Manager", 32);
+    windows[3].bg_color = 0x00F0F0F0; // light gray for task manager
+    windows[3].title_color = 0x00333333; // dark gray title
+    windows[3].border_color = 0x00000000;
+    windows[3].visible = 1;
+    windows[3].z = 3;
+    windows[3].has_button = 0;
+    windows[3].has_textbox = 0;
+
+    window_count = 4;
+    // z_order 0..3 back->front corresponds to windows index order initially
     for(int i=0;i<window_count;i++) z_order[i]=i;
 
-    s_puts("WM: created 3 windows (Window 1 has button)\n");
+    s_puts("WM: created 4 windows (Window 1 has button, Task Manager)\n");
     window_manager_draw_all();
     if(fb_is_double_buffered()) fb_swap(); // show windows without cursor yet, mouse will add cursor and swap again
 }

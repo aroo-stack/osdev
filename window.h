@@ -2,7 +2,7 @@
 #define WINDOW_H
 #include <stdint.h>
 
-#define MAX_WINDOWS 3
+#define MAX_WINDOWS 4
 #define TITLE_BAR_H 20
 #define TASKBAR_H 30
 #define MINIMIZE_BTN_W 16
