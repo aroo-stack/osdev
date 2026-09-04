@@ -42,6 +42,8 @@ struct window {
     struct textbox tbox;
     int has_textbox;
 };
+extern struct window windows[];
+extern int window_count;
 
 void window_manager_init(void);
 void window_manager_draw_all(void);
@@ -59,6 +61,8 @@ int window_is_in_title_bar(int idx, int x, int y);
 void window_set_needs_redraw(void);
 int window_needs_redraw(void);
 void window_do_redraw(void);
+extern volatile int g_needs_redraw;
+extern volatile int g_in_redraw;
 // button - Phase 12
 int window_handle_button_down(int x, int y); // returns 1 if hit button
 int window_handle_button_up(int x, int y); // returns 1 if click completed (incremented)

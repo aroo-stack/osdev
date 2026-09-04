@@ -44,8 +44,17 @@ mouse.o: mouse.c mouse.h framebuffer.h
 window.o: window.c window.h framebuffer.h graphics.h
 	$(CC) $(CFLAGS) -c window.c -o window.o
 
-kernel.bin: boot.o kernel.o gdt.o gdt_flush.o idt.o isr.o pmm.o paging.o heap.o framebuffer.o graphics.o mouse.o window.o linker.ld
-	ld $(LDFLAGS) -o kernel.bin boot.o kernel.o gdt.o gdt_flush.o idt.o isr.o pmm.o paging.o heap.o framebuffer.o graphics.o mouse.o window.o
+pit.o: pit.c pit.h
+	$(CC) $(CFLAGS) -c pit.c -o pit.o
+
+task.o: task.c task.h
+	$(CC) $(CFLAGS) -c task.c -o task.o
+
+sched.o: sched.s
+	$(AS) -f elf32 sched.s -o sched.o
+
+kernel.bin: boot.o kernel.o gdt.o gdt_flush.o idt.o isr.o pmm.o paging.o heap.o framebuffer.o graphics.o mouse.o window.o pit.o task.o sched.o linker.ld
+	ld $(LDFLAGS) -o kernel.bin boot.o kernel.o gdt.o gdt_flush.o idt.o isr.o pmm.o paging.o heap.o framebuffer.o graphics.o mouse.o window.o pit.o task.o sched.o
 
 os.iso: kernel.bin
 	mkdir -p isodir/boot/grub

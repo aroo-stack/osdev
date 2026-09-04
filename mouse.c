@@ -1,6 +1,7 @@
 #include "mouse.h"
 #include "framebuffer.h"
 #include "window.h"
+#include "task.h"
 #include <stdint.h>
 #include <stddef.h>
 
@@ -114,10 +115,12 @@ void mouse_cursor_draw_current(void){ cursor_draw(mouse_x, mouse_y); }
 void mouse_cursor_invalidate(void){ saved_valid = 0; }
 
 static uint8_t prev_buttons = 0;
+static uint64_t g_last_tsc = 0;
 extern volatile int g_in_redraw;
 static inline uint64_t rdtsc_m(void){ uint32_t lo,hi; __asm__ volatile("rdtsc":"=a"(lo),"=d"(hi)); return ((uint64_t)hi<<32)|lo; }
 
 void mouse_handle_byte(uint8_t data){
+    mouse_irq_count_inc();
     if(mouse_cycle==0){
         if((data & 0x08)==0){
             return;
@@ -151,15 +154,14 @@ void mouse_handle_byte(uint8_t data){
             // This is the deferred-redraw fix: heavy work should be outside IRQ, so this should rarely happen now
         }
         uint64_t cur_tsc = rdtsc_m();
-        static uint64_t last_tsc=0;
-        if(last_tsc){
-            uint64_t delta = cur_tsc - last_tsc;
+        if(g_last_tsc){
+            uint64_t delta = cur_tsc - g_last_tsc;
             static int irq_cnt=0;
             if((++irq_cnt % 20)==0){
                 s_puts("MOUSE: IRQ interval cycles "); s_put_dec((uint32_t)delta); s_puts("\n");
             }
         }
-        last_tsc = cur_tsc;
+        g_last_tsc = cur_tsc;
         s_puts("MOUSE: dx=");
         s_put_dec(dx);
         s_puts(" dy=");
@@ -257,17 +259,13 @@ void mouse_handle_byte(uint8_t data){
                 cursor_draw(mouse_x, mouse_y);
                 if(fb_is_double_buffered()) fb_swap();
             }
-            // Also handle textbox button release is already in window_handle_button_up, but textbox doesn't need release; focus already handled on down
-            // For completeness, also check if release was over textbox? Not needed
             __asm__ volatile("sti");
         } else if(moved && fb_is_available()){
-            __asm__ volatile("cli");
-            cursor_restore();
+            // Defer even simple moves to main loop to avoid race with window's textbox cursor and double-buffer save/restore
             mouse_x = new_x;
             mouse_y = new_y;
-            cursor_draw(mouse_x, mouse_y);
-            if(fb_is_double_buffered()) fb_swap();
-            __asm__ volatile("sti");
+            extern volatile int g_needs_redraw;
+            g_needs_redraw = 1;
         } else {
             mouse_x = new_x;
             mouse_y = new_y;

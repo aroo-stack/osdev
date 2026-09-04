@@ -35,16 +35,19 @@ extern kernel_main
 extern _bss_start
 extern _bss_end
 _start:
+    ; Save multiboot magic (EAX) and info (EBX) before clobbering EAX for BSS zeroing
+    push eax
+    push ebx
     ; Zero .bss - GRUB loads SHT_NOBITS but does NOT guarantee zero on QEMU reset with leftover RAM
-    ; Without this, static buffers like mouse saved_pixels, window z_order, heap bitmap etc. contain garbage
-    ; and the first cursor_restore reads garbage -> flicker on first interaction
     cld
     mov edi, _bss_start
     mov ecx, _bss_end
     sub ecx, edi
-    shr ecx, 2          ; count dwords
+    shr ecx, 2
     xor eax, eax
     rep stosd
+    pop ebx
+    pop eax
     mov esp, stack_top
     push ebx
     push eax

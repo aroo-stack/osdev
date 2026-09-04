@@ -10,6 +10,8 @@
 #include "graphics.h"
 #include "mouse.h"
 #include "window.h"
+#include "pit.h"
+#include "task.h"
 
 static inline void outb(uint16_t port, uint8_t val) {
     __asm__ volatile ("outb %0, %1" : : "a"(val), "Nd"(port));
@@ -47,6 +49,39 @@ static void vga_puts(const char* s) {
     volatile uint16_t* vga = (volatile uint16_t*) 0xB8000;
     for (size_t i = 0; s[i] != '\0'; i++) {
         vga[i] = (uint16_t) s[i] | (uint16_t) 0x0F00;
+    }
+}
+
+// Phase 15 test tasks - now with yield to avoid starving GUI (fix for fair-share jitter)
+static void task_a_entry(void){
+    int count=0;
+    for(;;){
+        for(volatile int i=0;i<50000;i++) __asm__ volatile("nop");
+        __asm__ volatile("cli");
+        outb(0x3F8, 'A'); outb(0x3F8, ':'); 
+        char buf[12]; int n=count++; int len=0; char tmp[12]; int t=0;
+        if(n==0) tmp[t++]='0'; else while(n){ tmp[t++]='0'+n%10; n/=10; }
+        while(t--) { while(!(inb(0x3F8+5)&0x20)); outb(0x3F8, tmp[t]); }
+        outb(0x3F8, '\n');
+        __asm__ volatile("sti");
+        // Yield/sleep - previously this was a tight spin (200k nops) that consumed 1/3 CPU and starved GUI to 33Hz
+        // Now we hlt to yield CPU - hlt will wake on next PIT tick and let GUI and other task run, so GUI gets more share
+        // This is the correct fix for a busy-loop test task that does nothing useful: it should sleep, not spin
+        for(int i=0;i<5;i++) __asm__ volatile("hlt");
+    }
+}
+static void task_b_entry(void){
+    int count=0;
+    for(;;){
+        for(volatile int i=0;i<50000;i++) __asm__ volatile("nop");
+        __asm__ volatile("cli");
+        outb(0x3F8, 'B'); outb(0x3F8, ':');
+        char buf[12]; int n=count++; int len=0; char tmp[12]; int t=0;
+        if(n==0) tmp[t++]='0'; else while(n){ tmp[t++]='0'+n%10; n/=10; }
+        while(t--) { while(!(inb(0x3F8+5)&0x20)); outb(0x3F8, tmp[t]); }
+        outb(0x3F8, '\n');
+        __asm__ volatile("sti");
+        for(int i=0;i<5;i++) __asm__ volatile("hlt");
     }
 }
 
@@ -266,17 +301,96 @@ void kernel_main(uint32_t magic, uint32_t mbi_addr) {
     mouse_init();
     serial_puts("MOUSE: ready - move mouse over QEMU window and click\n");
 
+    // Phase 15: PIT scheduler - must be after IDT/PIC and after tasks' stacks are mapped
+    serial_puts("PIT: init 100Hz (divisor 11931 -> 0x2E9B, cmd 0x36 mode 3)\n");
+    pit_init(100);
+    // Unmask IRQ0 (timer) - master PIC mask bit0, was 0xF9 (11111001) from mouse, need 0xF8 (11111000)
+    {
+        uint8_t mask = inb(0x21);
+        outb(0x21, mask & ~0x01);
+        serial_puts("PIT: IRQ0 unmasked, new mask 0x");
+        uint8_t nm = inb(0x21);
+        for(int i=7;i>=0;i--) { char c = ((nm>>i)&1)?'1':'0'; while(!(inb(0x3F8+5)&0x20)); outb(0x3F8,c); }
+        serial_puts("\n");
+    }
+    task_init();
+    task_create(task_a_entry, "TaskA");
+    task_create(task_b_entry, "TaskB");
+    serial_puts("TASK: 2 test tasks created, scheduler will preempt on next PIT tick (100Hz)\n");
+    // Note on coexistence: GUI main loop becomes task 0 (current ESP). Mouse IRQ12 and keyboard IRQ1 handlers
+    // still work because they are separate IRQs that will interrupt whichever task is running, save that task's
+    // context, handle the event (which may set g_needs_redraw), and on return the scheduler may have switched
+    // to another task. Shared state g_needs_redraw is a single int flag set in IRQ and cleared in main loop.
+    // This is safe for this demo because flag set/clear is atomic (single write) and main loop checks it with
+    // interrupts enabled, but there is a tiny race where main loop could check flag just before an IRQ sets it,
+    // then hlt would miss the wakeup. We handle this by checking flag again after hlt wakeup, and by having
+    // the flag be volatile. For a full OS, this would need proper locking or an atomic queue.
+    // For now, with only 3 tasks and simple flag, it's safe enough to demonstrate.
+
     __asm__ volatile ("sti");
+
+    // Synthetic test for Phase 15+ textbox + drag flicker bug - simulate user actions without needing QEMU window input
+    // This will run once at boot, after scheduler is running, to trigger the bug: click textbox, type, drag
+    {
+        // Brief delay to let scheduler start and tasks interleave a bit
+        for(volatile int i=0;i<5000000;i++) __asm__ volatile("nop");
+        serial_puts("TEST: synthetic click textbox at 300,230 and type hello\n");
+        window_handle_textbox_click(300,230); // Window2 textbox at 270,220
+        // scancodes for "hello" - Set 1 make codes: h=0x23, e=0x12, l=0x26, o=0x18
+        uint8_t hello_scancodes[] = {0x23, 0x12, 0x26, 0x26, 0x18, 0};
+        for(int i=0; hello_scancodes[i]; i++){
+            window_handle_scancode(hello_scancodes[i]);
+            // Also test backspace
+            if(i==2) window_handle_scancode(0x0E); // backspace after "hel"
+        }
+        // Trigger redraw for textbox
+        if(window_needs_redraw()) window_do_redraw();
+        serial_puts("TEST: after typing hello (with backspace), now drag Window1\n");
+        window_start_drag(110,110);
+        for(int i=0;i<20;i++){
+            window_update_drag(110+i*5, 110+i*5);
+            if(window_needs_redraw()) window_do_redraw();
+            for(volatile int j=0;j<200000;j++) __asm__ volatile("nop");
+        }
+        window_end_drag();
+        if(window_needs_redraw()) window_do_redraw();
+        serial_puts("TEST: synthetic drag done, check for black dots / flicker\n");
+    }
 
     // Uncomment to test exception handling (should print EXCEPTION and halt):
     // volatile int a = 1; volatile int b = 0; volatile int c = a / b; (void)c;
 
-    // Main loop - deferred window redraw runs outside IRQ (fixes freeze)
-    // Cursor blink handled here: window_tick_cursor toggles every ~20 redraws/idle ticks and sets needs_redraw
+    // Main loop - GUI task 0
+    int gui_tick = 0;
     for (;;) {
         window_tick_cursor();
         if(window_needs_redraw()){
             window_do_redraw();
+        }
+        if(g_report_ticks){
+            g_report_ticks = 0;
+            int gui=0,a=0,b=0;
+            pit_get_task_ticks(&gui,&a,&b);
+            int m = mouse_get_irqs();
+            __asm__ volatile("cli");
+            serial_puts("SCHED: ticks GUI "); 
+            { char tmp[12]; int n=gui; int t=0; if(n==0) tmp[t++]='0'; else while(n){ tmp[t++]='0'+n%10; n/=10; } while(t--) serial_putc(tmp[t]); }
+            serial_puts(" A "); { char tmp[12]; int n=a; int t=0; if(n==0) tmp[t++]='0'; else while(n){ tmp[t++]='0'+n%10; n/=10; } while(t--) serial_putc(tmp[t]); }
+            serial_puts(" B "); { char tmp[12]; int n=b; int t=0; if(n==0) tmp[t++]='0'; else while(n){ tmp[t++]='0'+n%10; n/=10; } while(t--) serial_putc(tmp[t]); }
+            serial_puts(" mouse "); { char tmp[12]; int n=m; int t=0; if(n==0) tmp[t++]='0'; else while(n){ tmp[t++]='0'+n%10; n/=10; } while(t--) serial_putc(tmp[t]); }
+            serial_puts("\n");
+            pit_reset_task_ticks();
+            mouse_reset_irqs();
+            __asm__ volatile("sti");
+        }
+        if((++gui_tick % 200)==0){
+            __asm__ volatile("cli");
+            outb(0x3F8, 'G'); outb(0x3F8, 'U'); outb(0x3F8, 'I'); outb(0x3F8, ':');
+            char tmp[12]; int n=gui_tick/200; int t=0;
+            if(n==0) tmp[t++]='0'; else while(n){ tmp[t++]='0'+n%10; n/=10; }
+            while(t--) { while(!(inb(0x3F8+5)&0x20)); outb(0x3F8, tmp[t]); }
+            outb(0x3F8, '\n');
+            __asm__ volatile("sti");
         }
         __asm__ volatile ("hlt");
     }

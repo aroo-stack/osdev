@@ -121,8 +121,9 @@ void idt_install(void) {
     idt_set_gate(30, (uint32_t)isr30, 0x08, 0x8E);
     idt_set_gate(31, (uint32_t)isr31, 0x08, 0x8E);
 
-    // remapped PIC IRQs 32-47
-    idt_set_gate(32, (uint32_t)irq0,  0x08, 0x8E);
+    // remapped PIC IRQs 32-47 - PIT vector 32 uses dedicated scheduler handler, not generic irq0
+    extern void pit_handler(void);
+    idt_set_gate(32, (uint32_t)pit_handler,  0x08, 0x8E);
     idt_set_gate(33, (uint32_t)irq1,  0x08, 0x8E);
     idt_set_gate(34, (uint32_t)irq2,  0x08, 0x8E);
     idt_set_gate(35, (uint32_t)irq3,  0x08, 0x8E);

@@ -11,9 +11,9 @@ static void w_strcpy(char *dst, const char *src, int n){
     dst[n-1]=0;
 }
 
-static struct window windows[MAX_WINDOWS];
-static int window_count = 0;
-static int z_order[MAX_WINDOWS]; // indices sorted back->front
+struct window windows[MAX_WINDOWS];
+int window_count = 0;
+int z_order[MAX_WINDOWS]; // indices sorted back->front
 // drag state - must be zeroed at boot (BSS) and explicitly reset in window_manager_init
 static int dragging = 0;
 static int drag_win = -1;
@@ -27,9 +27,10 @@ static int resize_start_w = 0, resize_start_h = 0;
 volatile int g_in_redraw = 0;
 static int g_redraw_count = 0;
 static int g_missed_during_redraw = 0;
+volatile int g_sched_during_redraw = 0;
 static inline uint64_t rdtsc(void){ uint32_t lo,hi; __asm__ volatile("rdtsc":"=a"(lo),"=d"(hi)); return ((uint64_t)hi<<32)|lo; }
 // deferred redraw flag for Phase 12 fix - heavy window redraw should not run inside IRQ
-static volatile int g_needs_redraw = 0;
+volatile int g_needs_redraw = 0;
 
 static inline void outb(uint16_t port, uint8_t v){ __asm__ volatile("outb %0,%1"::"a"(v),"Nd"(port));}
 static inline uint8_t inb(uint16_t port){ uint8_t r; __asm__ volatile("inb %1,%0":"=a"(r):"Nd"(port)); return r;}
@@ -76,24 +77,54 @@ static void window_draw_textbox(struct window *w){
     uint32_t textcol = 0x00000000; // black text
     fb_draw_rect(ax, ay, w->tbox.w, w->tbox.h, bg);
     gfx_draw_rect_outline(ax, ay, w->tbox.w, w->tbox.h, border);
-    // draw text inside, clipped, with 4px padding
-    int tx = ax + 4;
-    int ty = ay + (w->tbox.h - 8)/2;
-    // clip to textbox width -4
-    char tmp[65];
+    // multi-line wrapping: chars per line based on width, lines based on height
+    int chars_per_line = (w->tbox.w - 8) / 8; // 4px padding each side
+    if(chars_per_line < 1) chars_per_line = 1;
+    int line_height = 10; // 8px font + 2px spacing
+    int lines_visible = (w->tbox.h - 8) / line_height; // 4px top/bottom padding
+    if(lines_visible < 1) lines_visible = 1;
     int len = w->tbox.len;
-    if(len > 60) len = 60;
-    for(int i=0;i<len;i++) tmp[i]=w->tbox.buffer[i];
-    tmp[len]=0;
-    gfx_draw_string(tx, ty, tmp, textcol);
-    // blinking cursor at end of text when focused
+    if(len > w->tbox.max_len) len = w->tbox.max_len;
+    // total lines needed for current buffer
+    int total_lines = (len + chars_per_line - 1) / chars_per_line;
+    if(total_lines < 1) total_lines = 1;
+    // vertical scrolling: if more lines than fit, show last N lines
+    int first_line = 0;
+    if(total_lines > lines_visible){
+        first_line = total_lines - lines_visible;
+    }
+    // draw visible lines
+    int tx0 = ax + 4;
+    int ty0 = ay + 4;
+    for(int line = 0; line < lines_visible; line++){
+        int src_line = first_line + line;
+        int start_idx = src_line * chars_per_line;
+        if(start_idx >= len) break; // no more text for this line
+        int remaining = len - start_idx;
+        int to_draw = remaining < chars_per_line ? remaining : chars_per_line;
+        // copy to tmp
+        char tmp[65];
+        for(int i=0;i<to_draw;i++) tmp[i]=w->tbox.buffer[start_idx+i];
+        tmp[to_draw]=0;
+        int y = ty0 + line * line_height;
+        gfx_draw_string(tx0, y, tmp, textcol);
+    }
+    // blinking cursor at end of text - calculate wrapped position
     if(w->tbox.focused && w->tbox.cursor_visible){
-        int cx = tx + len*8;
-        int cy = ty;
-        // vertical line 1px wide, 8px tall
-        for(int dy=0; dy<8; dy++) fb_put_pixel(cx, cy+dy, 0x00000000);
-        fb_put_pixel(cx+1, cy, 0x00000000);
-        fb_put_pixel(cx+1, cy+7, 0x00000000);
+        int cursor_idx = len; // after last char
+        int cursor_line = cursor_idx / chars_per_line;
+        int cursor_col = cursor_idx % chars_per_line;
+        // adjust for vertical scroll
+        int cursor_visible_line = cursor_line - first_line;
+        if(cursor_visible_line >= 0 && cursor_visible_line < lines_visible){
+            int cx = tx0 + cursor_col * 8;
+            int cy = ty0 + cursor_visible_line * line_height;
+            if(cx + 1 < ax + w->tbox.w - 1 && cy + 8 < ay + w->tbox.h - 1){
+                for(int dy=0; dy<8; dy++) fb_put_pixel(cx, cy+dy, 0x00000000);
+                fb_put_pixel(cx+1, cy, 0x00000000);
+                fb_put_pixel(cx+1, cy+7, 0x00000000);
+            }
+        }
     }
 }
 
