@@ -3,3 +3,9 @@
 kernel.bin
 os.iso
 isodir/
+
+# debug/preview output - regenerated, do not track
+horizon*.ppm
+horizon*.png
+wallpaper*.png
+wallpaper_preview*.png
