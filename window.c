@@ -140,6 +140,17 @@ static void window_draw_minimize_button(struct window *w){
     gfx_draw_string(tx, ty, "_", 0x00000000);
 }
 
+static void window_draw_close_button(struct window *w){
+    // small "X" button at top-right of title bar, left of minimize (w-40,2), 16x16
+    int bx = w->x + w->w - CLOSE_BTN_W - 4 - MINIMIZE_BTN_W - 4; // 4px gap between close and minimize
+    int by = w->y + 2;
+    fb_draw_rect(bx, by, CLOSE_BTN_W, CLOSE_BTN_H, 0x00FF6666); // reddish for close
+    gfx_draw_rect_outline(bx, by, CLOSE_BTN_W, CLOSE_BTN_H, 0x00000000);
+    int tx = bx + (CLOSE_BTN_W - 8)/2;
+    int ty = by + (CLOSE_BTN_H - 8)/2;
+    gfx_draw_string(tx, ty, "X", 0x00000000);
+}
+
 static void window_draw_single(int idx){
     struct window *w = &windows[idx];
     if(!w->visible || w->minimized) return;
@@ -149,9 +160,10 @@ static void window_draw_single(int idx){
     gfx_draw_rect_outline(w->x, w->y, w->w, TITLE_BAR_H, w->border_color);
     gfx_draw_string(w->x+6, w->y+6, w->title, 0x00FFFFFF);
     window_draw_minimize_button(w);
+    window_draw_close_button(w);
     window_draw_button(w);
     window_draw_textbox(w);
-    if(idx==3 && window_count==4){
+    if(w->title[0]=='T' && w->title[1]=='a' && w->title[5]=='M'){
         extern void pit_get_task_ticks(int *gui, int *a, int *b);
         int gui=0,a=0,b=0;
         pit_get_task_ticks(&gui,&a,&b);
@@ -214,6 +226,23 @@ void taskbar_draw(void){
         // small indicator for minimized: draw "_" at right of tab
         if(is_min){
             gfx_draw_string(tab_x+tab_w-20, tab_y+6, "_", 0x00FFFFFF);
+        }
+    }
+    // "+" button at far right for creating new windows
+    {
+        int plus_w = 30, plus_h = TASKBAR_H - 6;
+        int plus_x = fb_w - plus_w - 5;
+        int plus_y = ty + 3;
+        int at_max = (window_count >= MAX_WINDOWS);
+        uint32_t bg = at_max ? 0x00555555 : 0x00AAAAAA; // gray when disabled, lighter when enabled
+        uint32_t border = 0x00000000;
+        fb_draw_rect(plus_x, plus_y, plus_w, plus_h, bg);
+        gfx_draw_rect_outline(plus_x, plus_y, plus_w, plus_h, border);
+        // draw "+" centered
+        gfx_draw_string(plus_x+11, plus_y+6, "+", 0x00000000);
+        if(at_max){
+            // also draw small "X" or dim to indicate disabled
+            gfx_draw_string(plus_x+11, plus_y+6, "+", 0x00888888);
         }
     }
 }
@@ -286,6 +315,50 @@ void window_manager_init(void){
     if(fb_is_double_buffered()) fb_swap(); // show windows without cursor yet, mouse will add cursor and swap again
 }
 
+int window_create_new(void){
+    if(window_count >= MAX_WINDOWS){
+        s_puts("WM: create window failed - at max "); s_put_dec(MAX_WINDOWS); s_puts("\n");
+        return -1;
+    }
+    int idx = window_count;
+    int base_x = 100 + (window_count * 30) % 300;
+    int base_y = 100 + (window_count * 30) % 200;
+    int w = 350, h = 250;
+    int fb_w = fb_get_width();
+    int fb_h = fb_get_height();
+    if(base_x + w > fb_w - 60) base_x = fb_w - w - 60;
+    if(base_y + h > fb_h - TASKBAR_H - 20) base_y = fb_h - TASKBAR_H - h - 20;
+    if(base_x < 0) base_x = 0;
+    if(base_y < 0) base_y = 0;
+    windows[idx].x = base_x;
+    windows[idx].y = base_y;
+    windows[idx].w = w;
+    windows[idx].h = h;
+    {
+        char buf[32]; const char *pf="Window "; int pp=0; while(pf[pp]){ buf[pp]=pf[pp]; pp++; }
+        char nb[8]; int nn=idx+1; int nl=0; char rev[8]; int r=0;
+        if(nn==0) rev[r++]='0'; else while(nn){ rev[r++]='0'+nn%10; nn/=10; }
+        while(r--) buf[pp++]=rev[r]; buf[pp]=0;
+        w_strcpy(windows[idx].title, buf, 32);
+    }
+    windows[idx].bg_color = 0x00CCCCCC;
+    windows[idx].title_color = 0x00444444;
+    windows[idx].border_color = 0x00000000;
+    windows[idx].visible = 1;
+    windows[idx].minimized = 0;
+    windows[idx].z = window_count;
+    windows[idx].has_button = 0;
+    windows[idx].has_textbox = 0;
+    z_order[window_count] = idx;
+    window_count++;
+    for(int i=0;i<window_count;i++) windows[z_order[i]].z = i;
+    s_puts("WM: created Window "); s_put_dec(idx+1); s_puts(" at "); s_put_dec(base_x); s_putc(','); s_put_dec(base_y);
+    s_puts(" count now "); s_put_dec(window_count); s_puts("\n");
+    g_needs_redraw = 1;
+    return idx;
+}
+
+
 void window_manager_draw_all(void){
     if(!fb_is_available()) return;
     fb_fill(0x00112244);
@@ -335,6 +408,8 @@ int window_bring_to_front(int idx){
     g_needs_redraw = 1;
     return 1;
 }
+
+
 
 void window_set_needs_redraw(void){ g_needs_redraw = 1; }
 int window_needs_redraw(void){ return g_needs_redraw; }
@@ -466,6 +541,15 @@ void window_end_resize(void){
     resize_win = -1;
 }
 
+int window_is_in_close_button(int idx, int x, int y){
+    if(idx<0||idx>=window_count) return 0;
+    struct window *w=&windows[idx];
+    if(w->minimized) return 0;
+    int bx = w->x + w->w - CLOSE_BTN_W - 4 - MINIMIZE_BTN_W - 4;
+    int by = w->y + 2;
+    return (x >= bx && x < bx+CLOSE_BTN_W && y >= by && y < by+CLOSE_BTN_H);
+}
+
 int window_handle_minimize_click(int x, int y){
     // Check topmost window's minimize button first (before drag)
     int idx = window_find_at(x,y);
@@ -483,10 +567,85 @@ int window_handle_minimize_click(int x, int y){
     return 0;
 }
 
+int window_handle_close_click(int x, int y){
+    int idx = window_find_at(x,y);
+    if(idx==-1) return 0;
+    if(!window_is_in_close_button(idx,x,y)) return 0;
+    s_puts("WM: close click Window "); s_put_dec(idx+1); s_puts("\n");
+    window_close(idx);
+    return 1;
+}
+
+void window_close(int idx){
+    if(idx<0||idx>=window_count) return;
+    s_puts("WM: closing Window "); s_put_dec(idx+1); s_puts(" title "); s_puts(windows[idx].title); s_puts("\n");
+    // If closed window was being dragged/resized, cancel
+    if(dragging && drag_win==idx){
+        dragging=0; drag_win=-1;
+        s_puts("WM: cancel drag for closed window\n");
+    }
+    if(resizing && resize_win==idx){
+        resizing=0; resize_win=-1;
+        s_puts("WM: cancel resize for closed window\n");
+    }
+    // If closed window had focused textbox, unfocus (no dangling focused)
+    if(windows[idx].has_textbox && windows[idx].tbox.focused){
+        s_puts("WM: unfocus textbox of closed window\n");
+    }
+    // If closed window had pressed button, clear
+    if(windows[idx].has_button && windows[idx].btn.pressed){
+        windows[idx].btn.pressed=0;
+    }
+    // Remove from z_order: find pos of idx in z_order, remove it, and adjust indices > idx
+    int pos=-1;
+    for(int i=0;i<window_count;i++) if(z_order[i]==idx) pos=i;
+    // Shift windows array down by one from idx+1 to end
+    for(int i=idx;i<window_count-1;i++) windows[i]=windows[i+1];
+    // Adjust z_order: remove entry at pos, and for any entry > idx, decrement by 1
+    for(int i=pos;i<window_count-1;i++) z_order[i]=z_order[i+1];
+    // Now window_count decreased by 1, and z_order has one fewer valid entry
+    // For remaining z_order entries, if they were > idx, they now point to shifted windows, so decrement
+    for(int i=0;i<window_count-1;i++){
+        if(z_order[i] > idx) z_order[i]--;
+    }
+    window_count--;
+    // Update z values for debug
+    for(int i=0;i<window_count;i++) windows[z_order[i]].z = i;
+    // Adjust drag/resize indices if they pointed to windows that shifted
+    if(drag_win > idx) drag_win--;
+    else if(drag_win == idx) { dragging=0; drag_win=-1; }
+    if(resize_win > idx) resize_win--;
+    else if(resize_win == idx) { resizing=0; resize_win=-1; }
+    // Also need to handle that any window's button pressed state that was for the closed window is gone, but other windows' button states remain
+    s_puts("WM: closed, new count "); s_put_dec(window_count);
+    s_puts(" z=[");
+    for(int i=0;i<window_count;i++){ s_put_dec(z_order[i]); if(i<window_count-1) s_putc(','); }
+    s_puts("]\n");
+    // Example trace for spec: windows[3] closed while z_order=[0,2,1,3] count=4
+    // Before: windows[0]=W1,1=W2,2=W3,3=TaskMan, z=[0,2,1,3] (W1 back, W3, W2, TaskMan front)
+    // Remove idx 3: windows array shifts none (since idx is last), z_order remove pos 3 (value 3) => z=[0,2,1], count 3, no indices >3 to decrement, so z now correctly points to W1(0),W3(1 after shift? Wait W3 was at idx 2, still 2? Actually after shift, windows[2] is still W3, but its old index 2 is now still 2? No, after removing idx 3, windows[0..2] remain W1,W2,W3, indices 0,1,2, and z_order [0,2,1] now correctly points to W1(0), W3(2), W2(1) - W2 is now at idx 1 (was 1), W3 at idx 2 (was 2) - correct.
+    // If remove idx 1 (W2) with z=[0,2,1,3]: windows shift: W2 removed, W3 moves from idx2->1, TaskMan from idx3->2. z_order remove pos2 (value1) => [0,2,3] then decrement >1: 2->1,3->2 => [0,1,2] which is W1(0), W3(new1), TaskMan(new2) - correct, no dangling 3.
+    g_needs_redraw = 1;
+}
+
 int window_handle_taskbar_click(int x, int y){
     if(!fb_is_available()) return 0;
     int ty = fb_get_height() - TASKBAR_H;
     if(y < ty || y >= ty + TASKBAR_H) return 0;
+    // Check "+" button at far right first (before window tabs, it's part of taskbar)
+    {
+        int plus_w = 30, plus_h = TASKBAR_H - 6;
+        int plus_x = fb_get_width() - plus_w - 5;
+        int plus_y = ty + 3;
+        if(x >= plus_x && x < plus_x+plus_w && y >= plus_y && y < plus_y+plus_h){
+            if(window_count >= MAX_WINDOWS){
+                s_puts("WM: create window failed - at max "); s_put_dec(MAX_WINDOWS); s_puts(" (disabled)\n");
+                return 1; // handled (no-op, but don't fall through to window tabs)
+            }
+            window_create_new();
+            return 1;
+        }
+    }
     // Check each tab
     for(int i=0;i<window_count;i++){
         int tab_x = 5 + i * (150 + 5);

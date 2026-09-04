@@ -219,7 +219,8 @@ void mouse_handle_byte(uint8_t data){
         } else if(left_pressed){
             __asm__ volatile("cli");
             mouse_x = new_x; mouse_y = new_y;
-            if(window_handle_minimize_click(new_x, new_y)){
+            if(window_handle_close_click(new_x, new_y)){
+            } else if(window_handle_minimize_click(new_x, new_y)){
             } else if(window_handle_taskbar_click(new_x, new_y)){
             } else {
                 int is_resize = 0;

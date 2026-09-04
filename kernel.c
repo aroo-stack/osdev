@@ -360,6 +360,7 @@ void kernel_main(uint32_t magic, uint32_t mbi_addr) {
     // Uncomment to test exception handling (should print EXCEPTION and halt):
     // volatile int a = 1; volatile int b = 0; volatile int c = a / b; (void)c;
 
+
     // Main loop - GUI task 0
     int gui_tick = 0;
     int taskman_tick = 0;
