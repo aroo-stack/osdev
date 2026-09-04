@@ -240,10 +240,18 @@ void mouse_handle_byte(uint8_t data){
                     if(fb_is_available()){
                         did_redraw = window_handle_click(new_x, new_y);
                     }
-                    if(!did_redraw && moved && fb_is_available()){
-                        cursor_restore();
-                        cursor_draw(new_x, new_y);
-                        if(fb_is_double_buffered()) fb_swap();
+                    if(did_redraw){
+                        // click was inside a window body, icon check skipped (icons are under windows)
+                    } else if(fb_is_available() && desktop_icon_handle_click(new_x, new_y)){
+                        // icon hit - handled (single select or double-click action), redraw deferred to main loop
+                    } else {
+                        // empty desktop (not taskbar/window/icon) -> deselect any selected icon
+                        if(fb_is_available()) desktop_icon_deselect_all();
+                        if(moved && fb_is_available()){
+                            cursor_restore();
+                            cursor_draw(new_x, new_y);
+                            if(fb_is_double_buffered()) fb_swap();
+                        }
                     }
                 }
             }

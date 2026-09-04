@@ -12,6 +12,10 @@
 #define RESIZE_HANDLE 12
 #define WIN_MIN_W 150
 #define WIN_MIN_H 100
+#define MAX_ICONS 3
+#define ICON_W 64
+#define ICON_H 64
+#define ICON_GLYPH 32
 
 struct button {
     int x, y, w, h; // relative to parent window origin (0,0 = window top-left)
@@ -47,6 +51,21 @@ struct window {
 extern struct window windows[];
 extern int window_count;
 extern int z_order[];
+
+// desktop icons - part of desktop layer under windows
+struct desktop_icon {
+    int x, y; // absolute desktop position (top-left of hit box)
+    char label[32];
+    uint32_t color; // glyph color
+    int selected; // 1 = highlighted
+};
+extern struct desktop_icon desktop_icons[];
+extern int desktop_icon_count;
+void desktop_icons_init(void);
+void desktop_icons_draw(void);
+int desktop_icon_hit_test(int x, int y); // returns icon index or -1
+int desktop_icon_handle_click(int x, int y); // single/double-click logic, returns 1 if hit icon
+void desktop_icon_deselect_all(void);
 
 void window_manager_init(void);
 void window_manager_draw_all(void);
@@ -91,5 +110,6 @@ int window_create_new(void);
 int window_handle_close_click(int x, int y);
 void window_close(int idx);
 int window_is_in_close_button(int idx, int x, int y);
+int window_find_by_title(const char *title);
 
 #endif

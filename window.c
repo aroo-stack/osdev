@@ -4,6 +4,7 @@
 #include "mouse.h"
 #include "pmm.h"
 #include "paging.h"
+#include "task.h"
 #include <stdint.h>
 #include <stddef.h>
 
@@ -266,6 +267,58 @@ void taskbar_draw(void){
     }
 }
 
+// --- Desktop icons (Bliss wallpaper layer, under windows) ---
+struct desktop_icon desktop_icons[MAX_ICONS];
+int desktop_icon_count = 0;
+static int selected_icon = -1;
+static int last_click_icon = -1;
+static int last_click_tick = -1000;
+static const int dbl_click_thresh = 50;
+void desktop_icons_init(void){
+    desktop_icon_count = 0; selected_icon = -1; last_click_icon = -1; last_click_tick = -1000;
+    desktop_icons[0].x = 20; desktop_icons[0].y = 40; w_strcpy(desktop_icons[0].label, "New Window", 32); desktop_icons[0].color = 0x004A90D9; desktop_icons[0].selected = 0;
+    desktop_icons[1].x = 20; desktop_icons[1].y = 140; w_strcpy(desktop_icons[1].label, "Task Manager", 32); desktop_icons[1].color = 0x0030A030; desktop_icons[1].selected = 0;
+    desktop_icon_count = 2;
+    s_puts("DESKTOP: icons init 2 at (20,40) New Window, (20,140) Task Manager\n");
+}
+void desktop_icons_draw(void){
+    if(!fb_is_available()) return;
+    for(int i=0;i<desktop_icon_count;i++){
+        struct desktop_icon *ic = &desktop_icons[i];
+        int ix = ic->x; int iy = ic->y;
+        int gx = ix + (ICON_W - ICON_GLYPH)/2; int gy = iy + 4;
+        if(i==0){ fb_draw_rect(gx, gy, ICON_GLYPH, ICON_GLYPH, ic->color); gfx_draw_rect_outline(gx, gy, ICON_GLYPH, ICON_GLYPH, 0x00000000); gfx_draw_string(gx+12, gy+12, "+", 0x00FFFFFF); }
+        else { gfx_draw_filled_circle(gx + ICON_GLYPH/2, gy + ICON_GLYPH/2, ICON_GLYPH/2, ic->color); gfx_draw_circle(gx + ICON_GLYPH/2, gy + ICON_GLYPH/2, ICON_GLYPH/2, 0x00000000); }
+        int len=0; while(ic->label[len] && len<32) len++;
+        int tx = ix + (ICON_W - len*8)/2; int ty = iy + 4 + ICON_GLYPH + 6;
+        if(ic->selected){ int bg_w = len*8 + 6; int bg_h = 10; int bg_x = tx - 3; int bg_y = ty - 1; fb_draw_rect(bg_x, bg_y, bg_w, bg_h, 0x000000FF); gfx_draw_string(tx, ty, ic->label, 0x00FFFFFF); }
+        else { gfx_draw_string(tx+1, ty+1, ic->label, 0x00444444); gfx_draw_string(tx, ty, ic->label, 0x00FFFFFF); }
+    }
+}
+int desktop_icon_hit_test(int x, int y){
+    for(int i=0;i<desktop_icon_count;i++){ struct desktop_icon *ic = &desktop_icons[i]; if(x >= ic->x && x < ic->x + ICON_W && y >= ic->y && y < ic->y + ICON_H) return i; }
+    return -1;
+}
+void desktop_icon_deselect_all(void){
+    int had=0; for(int i=0;i<desktop_icon_count;i++) if(desktop_icons[i].selected) had=1;
+    for(int i=0;i<desktop_icon_count;i++) desktop_icons[i].selected=0; selected_icon=-1;
+    if(had){ s_puts("DESKTOP: deselect all\n"); g_needs_redraw=1; }
+}
+static int icon_streq(const char *a, const char *b){ int i=0; while(a[i] && b[i] && a[i]==b[i]) i++; return a[i]==0 && b[i]==0; }
+int desktop_icon_handle_click(int x, int y){
+    int idx = desktop_icon_hit_test(x,y); if(idx==-1) return 0;
+    int now = pit_get_ticks(); s_puts("DESKTOP: click icon "); s_put_dec(idx); s_puts(" '"); s_puts(desktop_icons[idx].label); s_puts("' tick "); s_put_dec(now); s_puts("\n");
+    if(last_click_icon==idx && (now - last_click_tick) < dbl_click_thresh){
+        s_puts("DESKTOP: double-click icon "); s_put_dec(idx); s_puts("\n");
+        for(int i=0;i<desktop_icon_count;i++) desktop_icons[i].selected = (i==idx); selected_icon = idx; last_click_icon = -1; last_click_tick = -1000;
+        if(idx==0){ s_puts("DESKTOP: action New Window\n"); window_create_new(); }
+        else if(idx==1){ int found=-1; for(int i=0;i<window_count;i++) if(icon_streq(windows[i].title, "Task Manager")) { found=i; break; } if(found!=-1){ s_puts("DESKTOP: action Task Manager bring to front\n"); if(windows[found].minimized){ windows[found].minimized=0; s_puts("DESKTOP: unminimize Task Manager\n"); } window_bring_to_front(found); } else { s_puts("DESKTOP: action Task Manager create (was closed)\n"); if(window_count < MAX_WINDOWS){ int nid = window_count; windows[nid].x=600; windows[nid].y=100; windows[nid].w=300; windows[nid].h=200; w_strcpy(windows[nid].title, "Task Manager", 32); windows[nid].bg_color=0x00F0F0F0; windows[nid].title_color=0x00333333; windows[nid].border_color=0x00000000; windows[nid].visible=1; windows[nid].minimized=0; windows[nid].z=window_count; windows[nid].has_button=0; windows[nid].has_textbox=0; z_order[window_count]=nid; window_count++; for(int i=0;i<window_count;i++) windows[z_order[i]].z=i; s_puts("DESKTOP: created Task Manager\n"); g_needs_redraw=1; } else s_puts("DESKTOP: cannot create Task Manager - at max\n"); } }
+        g_needs_redraw=1; return 1;
+    } else {
+        for(int i=0;i<desktop_icon_count;i++) desktop_icons[i].selected = (i==idx); selected_icon = idx; last_click_icon = idx; last_click_tick = now; s_puts("DESKTOP: select icon "); s_put_dec(idx); s_puts("\n"); g_needs_redraw=1; return 1;
+    }
+}
+
 void window_manager_init(void){
     if(!fb_is_available()){
         s_puts("WM: no framebuffer, skip windows\n");
@@ -306,30 +359,17 @@ void window_manager_init(void){
     windows[1].tbox.cursor_visible = 1;
     windows[1].tbox.blink_counter = 0;
 
-    windows[2].x = 400; windows[2].y = 250; windows[2].w = 350; windows[2].h = 250;
-    w_strcpy(windows[2].title, "Window 3", 32);
-    windows[2].bg_color = 0x00FFE0B0; // peach
-    windows[2].title_color = 0x00339933; // green
-    windows[2].border_color = 0x00000000;
-    windows[2].visible = 1;
-    windows[2].z = 2;
-    windows[2].has_button = 0;
+    windows[2].x = 0; windows[2].y = 0; windows[2].w = 0; windows[2].h = 0;
+    windows[2].visible = 0; windows[2].minimized = 0;
+    windows[3].x = 0; windows[3].y = 0; windows[3].w = 0; windows[3].h = 0;
+    windows[3].visible = 0; windows[3].minimized = 0;
 
-    windows[3].x = 600; windows[3].y = 100; windows[3].w = 300; windows[3].h = 200;
-    w_strcpy(windows[3].title, "Task Manager", 32);
-    windows[3].bg_color = 0x00F0F0F0; // light gray for task manager
-    windows[3].title_color = 0x00333333; // dark gray title
-    windows[3].border_color = 0x00000000;
-    windows[3].visible = 1;
-    windows[3].z = 3;
-    windows[3].has_button = 0;
-    windows[3].has_textbox = 0;
-
-    window_count = 4;
-    // z_order 0..3 back->front corresponds to windows index order initially
+    window_count = 2;
+    // z_order 0..1 back->front corresponds to windows index order initially
     for(int i=0;i<window_count;i++) z_order[i]=i;
 
-    s_puts("WM: created 4 windows (Window 1 has button, Task Manager)\n");
+    desktop_icons_init();
+    s_puts("WM: created 2 windows (Window 1 button, Window 2 textbox) + 2 desktop icons\n");
     // Build wallpaper cache once (draws Bliss then snapshots, measures flat vs Bliss vs blit)
     wallpaper_cache_build_once();
     window_manager_draw_all();
@@ -645,6 +685,8 @@ void window_manager_draw_all(void){
         last_wallpaper_cycles = t_wall1 - t_wall0;
         s_puts("WALLPAPER: uncached draw cycles "); s_put_cycles(last_wallpaper_cycles); s_puts("\n");
     }
+    // Desktop icons are part of desktop layer under windows (z-order: wallpaper -> icons -> windows -> taskbar)
+    desktop_icons_draw();
     uint64_t t_win0 = rdtsc();
     for(int i=0;i<window_count;i++){
         int idx = z_order[i];
@@ -923,6 +965,10 @@ void window_close(int idx){
     // Remove idx 3: windows array shifts none (since idx is last), z_order remove pos 3 (value 3) => z=[0,2,1], count 3, no indices >3 to decrement, so z now correctly points to W1(0),W3(1 after shift? Wait W3 was at idx 2, still 2? Actually after shift, windows[2] is still W3, but its old index 2 is now still 2? No, after removing idx 3, windows[0..2] remain W1,W2,W3, indices 0,1,2, and z_order [0,2,1] now correctly points to W1(0), W3(2), W2(1) - W2 is now at idx 1 (was 1), W3 at idx 2 (was 2) - correct.
     // If remove idx 1 (W2) with z=[0,2,1,3]: windows shift: W2 removed, W3 moves from idx2->1, TaskMan from idx3->2. z_order remove pos2 (value1) => [0,2,3] then decrement >1: 2->1,3->2 => [0,1,2] which is W1(0), W3(new1), TaskMan(new2) - correct, no dangling 3.
     g_needs_redraw = 1;
+}
+int window_find_by_title(const char *title){
+    for(int i=0;i<window_count;i++) if(icon_streq(windows[i].title, title)) return i;
+    return -1;
 }
 
 int window_handle_taskbar_click(int x, int y){

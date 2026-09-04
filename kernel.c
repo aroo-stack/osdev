@@ -329,33 +329,8 @@ void kernel_main(uint32_t magic, uint32_t mbi_addr) {
 
     __asm__ volatile ("sti");
 
-    // Synthetic test for Phase 15+ textbox + drag flicker bug - simulate user actions without needing QEMU window input
-    // This will run once at boot, after scheduler is running, to trigger the bug: click textbox, type, drag
-    {
-        // Brief delay to let scheduler start and tasks interleave a bit
-        for(volatile int i=0;i<5000000;i++) __asm__ volatile("nop");
-        serial_puts("TEST: synthetic click textbox at 300,230 and type hello\n");
-        window_handle_textbox_click(300,230); // Window2 textbox at 270,220
-        // scancodes for "hello" - Set 1 make codes: h=0x23, e=0x12, l=0x26, o=0x18
-        uint8_t hello_scancodes[] = {0x23, 0x12, 0x26, 0x26, 0x18, 0};
-        for(int i=0; hello_scancodes[i]; i++){
-            window_handle_scancode(hello_scancodes[i]);
-            // Also test backspace
-            if(i==2) window_handle_scancode(0x0E); // backspace after "hel"
-        }
-        // Trigger redraw for textbox
-        if(window_needs_redraw()) window_do_redraw();
-        serial_puts("TEST: after typing hello (with backspace), now drag Window1\n");
-        window_start_drag(110,110);
-        for(int i=0;i<20;i++){
-            window_update_drag(110+i*5, 110+i*5);
-            if(window_needs_redraw()) window_do_redraw();
-            for(volatile int j=0;j<200000;j++) __asm__ volatile("nop");
-        }
-        window_end_drag();
-        if(window_needs_redraw()) window_do_redraw();
-        serial_puts("TEST: synthetic drag done, check for black dots / flicker\n");
-    }
+    // Synthetic tests removed: previous Phase 15 drag stress-test (window_start_drag at 110,110 + 20 updates) left Window1 auto-dragged to ~210,210 on every boot.
+    // Also removed desktop icon auto-test that created extra windows at boot. Manual live testing now required.
 
     // Uncomment to test exception handling (should print EXCEPTION and halt):
     // volatile int a = 1; volatile int b = 0; volatile int c = a / b; (void)c;
@@ -368,10 +343,10 @@ void kernel_main(uint32_t magic, uint32_t mbi_addr) {
         window_tick_cursor();
         // Task Manager live refresh - every ~20 iterations (~0.5s) to update tick counts without constant redraw
         // Chosen over every loop (60Hz full redraw = 180MB/s) to keep responsiveness, vs every second would be too laggy to watch counts climb
+        // Dynamic: find Task Manager by title, not hardcoded index 3 / count 4 (now boots with 2 windows)
         if(++taskman_tick % 20 == 0){
-            extern struct window windows[];
-            extern int window_count;
-            if(window_count==4 && !windows[3].minimized && windows[3].visible){
+            int tm = window_find_by_title("Task Manager");
+            if(tm != -1 && !windows[tm].minimized && windows[tm].visible){
                 g_needs_redraw = 1;
             }
         }
