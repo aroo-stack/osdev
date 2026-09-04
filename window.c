@@ -92,9 +92,21 @@ static void window_draw_textbox(struct window *w){
     }
 }
 
+static void window_draw_minimize_button(struct window *w){
+    // small "_" button at top-right of title bar, 16x16, 4px from right edge, 2px from top
+    int bx = w->x + w->w - MINIMIZE_BTN_W - 4;
+    int by = w->y + 2;
+    fb_draw_rect(bx, by, MINIMIZE_BTN_W, MINIMIZE_BTN_H, 0x00CCCCCC);
+    gfx_draw_rect_outline(bx, by, MINIMIZE_BTN_W, MINIMIZE_BTN_H, 0x00000000);
+    // draw "_" centered
+    int tx = bx + (MINIMIZE_BTN_W - 8)/2;
+    int ty = by + (MINIMIZE_BTN_H - 8)/2 + 2;
+    gfx_draw_string(tx, ty, "_", 0x00000000);
+}
+
 static void window_draw_single(int idx){
     struct window *w = &windows[idx];
-    if(!w->visible) return;
+    if(!w->visible || w->minimized) return;
     // filled background
     fb_draw_rect(w->x, w->y, w->w, w->h, w->bg_color);
     // title bar
@@ -104,10 +116,43 @@ static void window_draw_single(int idx){
     gfx_draw_rect_outline(w->x, w->y, w->w, TITLE_BAR_H, w->border_color);
     // title text - centered vertically in title bar (8px font, title bar 20px)
     gfx_draw_string(w->x+6, w->y+6, w->title, 0x00FFFFFF);
+    // minimize button - always on title bar top-right
+    window_draw_minimize_button(w);
     // button if any
     window_draw_button(w);
     // textbox if any
     window_draw_textbox(w);
+}
+
+void taskbar_draw(void){
+    if(!fb_is_available()) return;
+    int fb_h = fb_get_height();
+    int fb_w = fb_get_width();
+    int ty = fb_h - TASKBAR_H;
+    // taskbar background - dark gray
+    fb_draw_rect(0, ty, fb_w, TASKBAR_H, 0x00222222);
+    gfx_draw_rect_outline(0, ty, fb_w, TASKBAR_H, 0x00000000);
+    // tabs for each window
+    for(int i=0;i<window_count;i++){
+        int tab_x = 5 + i * (150 + 5);
+        int tab_y = ty + 3;
+        int tab_w = 150;
+        int tab_h = TASKBAR_H - 6;
+        // color: active front window is lighter, minimized is darker, others medium
+        int is_front = (z_order[window_count-1] == i);
+        int is_min = windows[i].minimized;
+        uint32_t bg;
+        if(is_min) bg = 0x00555555; // minimized dark
+        else if(is_front) bg = 0x00AAAAFF; // front light blue
+        else bg = 0x00888888; // normal gray
+        fb_draw_rect(tab_x, tab_y, tab_w, tab_h, bg);
+        gfx_draw_rect_outline(tab_x, tab_y, tab_w, tab_h, 0x00000000);
+        gfx_draw_string(tab_x+6, tab_y+6, windows[i].title, 0x00FFFFFF);
+        // small indicator for minimized: draw "_" at right of tab
+        if(is_min){
+            gfx_draw_string(tab_x+tab_w-20, tab_y+6, "_", 0x00FFFFFF);
+        }
+    }
 }
 
 void window_manager_init(void){
@@ -170,31 +215,28 @@ void window_manager_init(void){
 
 void window_manager_draw_all(void){
     if(!fb_is_available()) return;
-    // Full screen redraw back-to-front - with double buffering, this draws to back buffer
-    // Desktop background
     fb_fill(0x00112244);
-
-    // Draw windows back-to-front via z_order
-    // z_order[0] = back, z_order[N-1] = front
     for(int i=0;i<window_count;i++){
         int idx = z_order[i];
+        if(windows[idx].minimized) continue;
         window_draw_single(idx);
     }
-
+    taskbar_draw();
     s_puts("WM: drew windows back->front z=[");
     for(int i=0;i<window_count;i++){ s_put_dec(z_order[i]); if(i<window_count-1) s_putc(','); }
-    s_puts("]\n");
-    // Double buffering: drawing is to back buffer, visible front only updated via fb_swap()
-    // Caller should swap after drawing windows + cursor to show complete frame in one burst
-    // (prevents seeing intermediate blank/partial states that cause flicker)
+    s_puts("] minimized: ");
+    for(int i=0;i<window_count;i++){ s_put_dec(windows[i].minimized); if(i<window_count-1) s_putc(','); }
+    s_puts("\n");
 }
 
+
+
 int window_find_at(int x, int y){
-    // front to back - topmost first
+    // front to back - topmost first, skip minimized (not drawn, not clickable)
     for(int i=window_count-1; i>=0; i--){
         int idx = z_order[i];
         struct window *w = &windows[idx];
-        if(!w->visible) continue;
+        if(!w->visible || w->minimized) continue;
         if(x >= w->x && x < w->x + w->w && y >= w->y && y < w->y + w->h){
             return idx;
         }
@@ -266,7 +308,53 @@ void window_get_info(int idx, int *x, int *y, int *w, int *h){
 int window_is_in_title_bar(int idx, int x, int y){
     if(idx<0||idx>=window_count) return 0;
     struct window *w = &windows[idx];
+    if(w->minimized) return 0;
     return (x >= w->x && x < w->x + w->w && y >= w->y && y < w->y + TITLE_BAR_H);
+}
+
+int window_handle_minimize_click(int x, int y){
+    // Check topmost window's minimize button first (before drag)
+    int idx = window_find_at(x,y);
+    if(idx==-1) return 0;
+    struct window *w = &windows[idx];
+    int bx = w->x + w->w - MINIMIZE_BTN_W - 4;
+    int by = w->y + 2;
+    if(x >= bx && x < bx+MINIMIZE_BTN_W && y >= by && y < by+MINIMIZE_BTN_H){
+        w->minimized = 1;
+        w->tbox.focused = 0; // unfocus textbox when minimized
+        s_puts("WM: minimize Window "); s_put_dec(idx+1); s_puts("\n");
+        g_needs_redraw = 1;
+        return 1;
+    }
+    return 0;
+}
+
+int window_handle_taskbar_click(int x, int y){
+    if(!fb_is_available()) return 0;
+    int ty = fb_get_height() - TASKBAR_H;
+    if(y < ty || y >= ty + TASKBAR_H) return 0;
+    // Check each tab
+    for(int i=0;i<window_count;i++){
+        int tab_x = 5 + i * (150 + 5);
+        int tab_y = ty + 3;
+        int tab_w = 150;
+        int tab_h = TASKBAR_H - 6;
+        if(x >= tab_x && x < tab_x+tab_w && y >= tab_y && y < tab_y+tab_h){
+            struct window *w = &windows[i];
+            if(w->minimized){
+                w->minimized = 0;
+                s_puts("WM: unminimize Window "); s_put_dec(i+1); s_puts("\n");
+            }
+            // Bring to front (if not already)
+            return window_bring_to_front(i);
+        }
+    }
+    return 0;
+}
+
+int window_is_minimized(int idx){
+    if(idx<0||idx>=window_count) return 0;
+    return windows[idx].minimized;
 }
 
 int window_is_dragging(void){ return dragging; }

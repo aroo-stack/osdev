@@ -223,24 +223,33 @@ void mouse_handle_byte(uint8_t data){
         } else if(left_pressed){
             __asm__ volatile("cli");
             mouse_x = new_x; mouse_y = new_y;
-            int is_title = 0;
-            int hit = window_find_at(new_x, new_y);
-            if(hit != -1) is_title = window_is_in_title_bar(hit, new_x, new_y);
-            if(is_title){
-                window_start_drag(new_x, new_y);
-            } else if(window_handle_button_down(new_x, new_y)){
-                // button hit - handled (bring to front + pressed visual)
-            } else if(window_handle_textbox_click(new_x, new_y)){
-                // textbox hit - focused, brought to front, handled
+            // Order: minimize control (inside title bar) BEFORE drag, otherwise clicking minimize would start drag
+            // Taskbar is always on top, so check it before any window hit (even though windows don't overlap taskbar area, this ensures taskbar clicks are not misrouted to desktop)
+            // Then title bar drag, then button, then textbox, then body - this ensures button/textbox clicks don't also trigger body focus underneath
+            if(window_handle_minimize_click(new_x, new_y)){
+                // minimize toggled, handled (full redraw deferred)
+            } else if(window_handle_taskbar_click(new_x, new_y)){
+                // taskbar tab hit - unminimized or brought to front, handled
             } else {
-                int did_redraw = 0;
-                if(fb_is_available()){
-                    did_redraw = window_handle_click(new_x, new_y);
-                }
-                if(!did_redraw && moved && fb_is_available()){
-                    cursor_restore();
-                    cursor_draw(new_x, new_y);
-                    if(fb_is_double_buffered()) fb_swap();
+                int is_title = 0;
+                int hit = window_find_at(new_x, new_y);
+                if(hit != -1) is_title = window_is_in_title_bar(hit, new_x, new_y);
+                if(is_title){
+                    window_start_drag(new_x, new_y);
+                } else if(window_handle_button_down(new_x, new_y)){
+                    // button hit
+                } else if(window_handle_textbox_click(new_x, new_y)){
+                    // textbox hit - focused
+                } else {
+                    int did_redraw = 0;
+                    if(fb_is_available()){
+                        did_redraw = window_handle_click(new_x, new_y);
+                    }
+                    if(!did_redraw && moved && fb_is_available()){
+                        cursor_restore();
+                        cursor_draw(new_x, new_y);
+                        if(fb_is_double_buffered()) fb_swap();
+                    }
                 }
             }
             __asm__ volatile("sti");

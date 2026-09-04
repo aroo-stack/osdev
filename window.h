@@ -4,6 +4,9 @@
 
 #define MAX_WINDOWS 3
 #define TITLE_BAR_H 20
+#define TASKBAR_H 30
+#define MINIMIZE_BTN_W 16
+#define MINIMIZE_BTN_H 16
 
 struct button {
     int x, y, w, h; // relative to parent window origin (0,0 = window top-left)
@@ -29,6 +32,7 @@ struct window {
     uint32_t title_color;
     uint32_t border_color;
     int visible;
+    int minimized; // 1 = not drawn on desktop, but taskbar tab still shows
     int z; // 0 = back, higher = front
     struct button btn;
     int has_button;
@@ -61,5 +65,10 @@ void window_handle_key(char c); // append char if focused textbox exists
 void window_handle_backspace(void);
 void window_tick_cursor(void); // called from main loop to blink
 int window_handle_scancode(uint8_t scancode); // translate scancode -> key, returns 1 if handled (focused textbox existed)
+// taskbar + minimize - Phase 13
+void taskbar_draw(void);
+int window_handle_minimize_click(int x, int y); // hit minimize "_" in title bar, toggles minimized
+int window_handle_taskbar_click(int x, int y); // hit taskbar tab, unminimize or bring to front
+int window_is_minimized(int idx);
 
 #endif
