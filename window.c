@@ -3,6 +3,7 @@
 #include "graphics.h"
 #include "mouse.h"
 #include "pmm.h"
+#include "paging.h"
 #include <stdint.h>
 #include <stddef.h>
 
@@ -32,6 +33,18 @@ static inline uint64_t rdtsc(void){ uint32_t lo,hi; __asm__ volatile("rdtsc":"=a
 // deferred redraw flag for Phase 12 fix - heavy window redraw should not run inside IRQ
 volatile int g_needs_redraw = 0;
 
+// --- Bliss wallpaper cache (1x framebuffer, ~3MB) to avoid recomputing sky+hills+circles every frame ---
+// Trade: PMM has ~127MB free (32349 frames before back buffer, 31579 after), cache needs 768 frames = 3MB -> feasible
+// Virtual layout: heap 0x00400000-0x00500000 (1MB), fb_back 0x00A00000-0x00CFFFFF (3MB), wallpaper 0x00D00000-0x00FFFFFF (3MB) below 0xFD000000 fb_front
+static uint32_t *wallpaper_cache = 0;
+static uint32_t wallpaper_cache_bytes = 0;
+static uint32_t wallpaper_cache_pages = 0;
+static int wallpaper_cache_ready = 0;
+static uint64_t wallpaper_build_cycles = 0; // cycles to build once
+static uint64_t last_wallpaper_cycles = 0; // per-frame wallpaper cost (recompute or blit)
+static uint64_t last_windows_cycles = 0;
+static void wallpaper_cache_build_once(void);
+
 static inline void outb(uint16_t port, uint8_t v){ __asm__ volatile("outb %0,%1"::"a"(v),"Nd"(port));}
 static inline uint8_t inb(uint16_t port){ uint8_t r; __asm__ volatile("inb %1,%0":"=a"(r):"Nd"(port)); return r;}
 static int tx_empty(){ return inb(0x3F8+5)&0x20; }
@@ -45,6 +58,8 @@ static void s_put_dec(int n){
     if(neg) s_putc('-');
     while(i--) s_putc(b[i]);
 }
+static void s_put_hex32(uint32_t n);
+static void s_put_cycles(uint64_t n);
 
 // Forward for cursor interaction - mouse.c provides cursor save/restore
 extern void window_redraw_with_cursor(void);
@@ -311,8 +326,80 @@ void window_manager_init(void){
     for(int i=0;i<window_count;i++) z_order[i]=i;
 
     s_puts("WM: created 4 windows (Window 1 has button, Task Manager)\n");
+    // Build wallpaper cache once (draws Bliss then snapshots, measures flat vs Bliss vs blit)
+    wallpaper_cache_build_once();
     window_manager_draw_all();
+    {
+        int w = fb_get_width(); int h = fb_get_height(); int sky_h = h*60/100;
+        int black=0, magenta=0; for(int x=0;x<w;x++) { uint32_t p=fb_get_pixel(x,sky_h); if(p==0x000000U) black++; if(p==0x00FF00FFU) magenta++; }
+        s_puts("HORIZON FINAL y="); s_put_dec(sky_h); s_puts(" black="); s_put_dec(black); s_puts(" magenta="); s_put_dec(magenta); s_puts("/"); s_put_dec(w);
+        s_puts(magenta==w ? " MAGENTA ACTIVE\n" : black==w ? " FULL BLACK LINE!\n" : " no full divider\n");
+        // Full scan for ANY full-width black line (fresh look)
+        int found_y=-1;
+        for(int y=0;y<h;y++){
+            int cnt=0;
+            for(int x=0;x<w;x++) if(fb_get_pixel(x,y)==0x000000U) cnt++;
+            if(cnt==w){ found_y=y; break; }
+            if(cnt>w*9/10 && cnt < w){ /* near-full */ }
+        }
+        if(found_y!=-1){
+            s_puts("SCAN found full black line at y="); s_put_dec(found_y); s_puts("\n");
+        } else {
+            s_puts("SCAN no full black line found (checked all 768 rows)\n");
+            // also check front buffer
+            int ffound=-1;
+            for(int y=0;y<h;y++){
+                int cnt=0;
+                for(int x=0;x<w;x++) if(fb_get_front_pixel(x,y)==0x000000U) cnt++;
+                if(cnt==w){ ffound=y; break; }
+            }
+            if(ffound!=-1) { s_puts("SCAN FRONT found full black at y="); s_put_dec(ffound); s_puts("\n"); }
+            else s_puts("SCAN FRONT also no full black line\n");
+        }
+    }
     if(fb_is_double_buffered()) fb_swap(); // show windows without cursor yet, mouse will add cursor and swap again
+    // Fresh look checks: test pattern overwrite, front vs back, QEMU artifact
+    {
+        int w = fb_get_width(); int h = fb_get_height(); int sky_h = h*60/100;
+        // 1. Test pattern should be overwritten: y=30 green line 0x00FF00 should now be sky, and magenta border at 0,0 should be sky
+        uint32_t p30 = fb_get_pixel(512,30); // back buffer after draw (now front after swap, but fb_get_pixel reads back, so check front for actual display)
+        uint32_t p30_front = fb_get_front_pixel(512,30);
+        uint32_t p00_front = fb_get_front_pixel(0,0);
+        uint32_t p00_back = fb_get_pixel(0,0);
+        s_puts("CHECK1 test pattern overwrite: y=30 back="); s_put_hex32(p30); s_puts(" front="); s_put_hex32(p30_front);
+        s_puts(" (expect sky ~B0E0E6 not 00FF00) "); s_puts(p30==0x0000FF00U ? "STALE!\n" : "overwritten OK\n");
+        s_puts(" border 0,0 front="); s_put_hex32(p00_front); s_puts(" back="); s_put_hex32(p00_back); s_puts("\n");
+        // 2. Front vs back at horizon - swap must copy every row including y=460
+        int mism=0;
+        for(int x=0;x<w;x++) if(fb_get_pixel(x,sky_h) != fb_get_front_pixel(x,sky_h)) mism++;
+        s_puts("CHECK2 front vs back at y="); s_put_dec(sky_h); s_puts(" mism="); s_put_dec(mism); s_puts("/"); s_put_dec(w);
+        s_puts(mism==0 ? " swap full OK\n" : " SWAP INCOMPLETE! stale front row visible\n");
+        // Also check cache vs back at horizon (stale cache?)
+        if(wallpaper_cache){
+            uint32_t c0 = wallpaper_cache[sky_h * w + 0];
+            uint32_t b0 = fb_get_pixel(0,sky_h);
+            uint32_t c1023 = wallpaper_cache[sky_h * w + 1023];
+            uint32_t b1023 = fb_get_pixel(1023,sky_h);
+            s_puts("CHECK3 cache vs back at horizon: x0 cache="); s_put_hex32(c0); s_puts(" back="); s_put_hex32(b0);
+            s_puts(" x1023 cache="); s_put_hex32(c1023); s_puts(" back="); s_put_hex32(b1023);
+            s_puts((c0==b0 && c1023==b1023) ? " cache fresh OK\n" : " STALE CACHE!\n");
+        }
+        s_puts("CHECK QEMU artifact: width="); s_put_dec(w); s_puts(" height="); s_put_dec(h); s_puts(" pitch="); s_put_dec(fb_get_size_bytes()/h); s_puts(" sky_h="); s_put_dec(sky_h); s_puts("\n");
+        // Dump horizon region 455-465 as PPM hex to verify visually - 11 rows
+        s_puts("DUMP_HORIZON_PPM_START\n");
+        s_puts("P3\n1024 11\n255\n");
+        for(int y=sky_h-5; y<=sky_h+5 && y<h; y++){
+            for(int x=0;x<w;x++){
+                uint32_t p = fb_get_front_pixel(x,y);
+                uint8_t r=(p>>16)&0xFF, g=(p>>8)&0xFF, b=p&0xFF;
+                // send as decimal triple
+                s_put_dec(r); s_putc(' '); s_put_dec(g); s_putc(' '); s_put_dec(b); s_putc(' ');
+                if(x%8==7) s_puts("\n");
+            }
+            s_puts("\n");
+        }
+        s_puts("DUMP_HORIZON_PPM_END\n");
+    }
 }
 
 int window_create_new(void){
@@ -359,20 +446,216 @@ int window_create_new(void){
 }
 
 
+static void draw_desktop_gradient(void){
+    // Kept for reference, now replaced by draw_bliss_wallpaper
+    uint32_t top = 0x00112244;
+    uint32_t bot = 0x002A4A6B;
+    uint8_t top_r = (top>>16)&0xFF, top_g=(top>>8)&0xFF, top_b=top&0xFF;
+    uint8_t bot_r = (bot>>16)&0xFF, bot_g=(bot>>8)&0xFF, bot_b=bot&0xFF;
+    int h = fb_get_height();
+    int w = fb_get_width();
+    for(int y=0; y<h; y++){
+        int ratio = (y * 255) / (h-1);
+        uint8_t r = top_r + ((bot_r - top_r)*ratio)/255;
+        uint8_t g = top_g + ((bot_g - top_g)*ratio)/255;
+        uint8_t b = top_b + ((bot_b - top_b)*ratio)/255;
+        uint32_t col = (r<<16)|(g<<8)|b;
+        fb_draw_rect(0, y, w, 1, col);
+    }
+}
+
+// --- Wallpaper cache helpers (static, PMM-backed) ---
+static void s_put_hex32(uint32_t n){ s_puts("0x"); for(int i=28;i>=0;i-=4){ uint8_t v=(n>>i)&0xF; s_putc(v<10?'0'+v:'A'+v-10); } }
+// 64-bit cycles fit in 32-bit for <4e9 (~1.3s @3GHz); truncate to avoid libgcc __udivdi3 in freestanding
+static void s_put_cycles(uint64_t n){ s_put_dec((uint32_t)n); }
+static int wallpaper_cache_alloc(void){
+    if(wallpaper_cache) return 1;
+    if(!fb_is_available()) return 0;
+    int w = fb_get_width(); int h = fb_get_height();
+    uint32_t need = (uint32_t)w * (uint32_t)h * 4;
+    wallpaper_cache_bytes = need;
+    wallpaper_cache_pages = (need + 0xFFF) >> 12; // 768 for 1024x768x32 (3MB)
+    uint32_t vaddr = 0x00D00000; // after fb_back 0x00A00000+3MB=0x00D00000, before 0xFD000000
+    s_puts("WALLPAPER: cache alloc "); s_put_dec(wallpaper_cache_pages); s_puts(" pages need "); s_put_dec(need/1024); s_puts(" KB at "); s_put_hex32(vaddr);
+    s_puts(" PMM free before "); s_put_dec(pmm_free_frames()); s_puts("\n");
+    for(uint32_t i=0;i<wallpaper_cache_pages;i++){
+        uint32_t p = pmm_alloc_frame();
+        if(!p){ s_puts("WALLPAPER: out of frames!\n"); return 0; }
+        paging_map(vaddr + i*0x1000, p, 0x03);
+        volatile uint32_t *ptr=(volatile uint32_t*)(vaddr + i*0x1000);
+        for(int j=0;j<1024;j++) ptr[j]=0;
+    }
+    wallpaper_cache = (uint32_t*)vaddr;
+    s_puts("WALLPAPER: cache ready at "); s_put_hex32(vaddr); s_puts(" PMM free after "); s_put_dec(pmm_free_frames()); s_puts("\n");
+    return 1;
+}
+static inline void wallpaper_blit_cached(void){
+    if(!wallpaper_cache_ready || !wallpaper_cache) return;
+    fb_blit_from(wallpaper_cache); // rep movsl 786432 dwords, no per-pixel sine/isqrt
+}
+
+// Bliss wallpaper - sine lookup table, no libm (freestanding)
+static const int8_t sin_table[256] = {
+       0,    3,    6,    9,   12,   15,   18,   21,   23,   26,   29,   32,   35,   38,   40,   43,
+      46,   49,   51,   54,   57,   59,   62,   64,   67,   69,   71,   74,   76,   78,   81,   83,
+      85,   87,   89,   91,   93,   95,   96,   98,  100,  101,  103,  104,  106,  107,  108,  110,
+     111,  112,  113,  114,  115,  116,  116,  117,  118,  118,  119,  119,  119,  120,  120,  120,
+     120,  120,  120,  120,  119,  119,  119,  118,  118,  117,  116,  116,  115,  114,  113,  112,
+     111,  110,  108,  107,  106,  104,  103,  101,  100,   98,   96,   95,   93,   91,   89,   87,
+      85,   83,   81,   78,   76,   74,   71,   69,   67,   64,   62,   59,   57,   54,   51,   49,
+      46,   43,   40,   38,   35,   32,   29,   26,   23,   21,   18,   15,   12,    9,    6,    3,
+       0,   -3,   -6,   -9,  -12,  -15,  -18,  -21,  -23,  -26,  -29,  -32,  -35,  -38,  -40,  -43,
+     -46,  -49,  -51,  -54,  -57,  -59,  -62,  -64,  -67,  -69,  -71,  -74,  -76,  -78,  -81,  -83,
+     -85,  -87,  -89,  -91,  -93,  -95,  -96,  -98, -100, -101, -103, -104, -106, -107, -108, -110,
+    -111, -112, -113, -114, -115, -116, -116, -117, -118, -118, -119, -119, -119, -120, -120, -120,
+    -120, -120, -120, -120, -119, -119, -119, -118, -118, -117, -116, -116, -115, -114, -113, -112,
+    -111, -110, -108, -107, -106, -104, -103, -101, -100,  -98,  -96,  -95,  -93,  -91,  -89,  -87,
+     -85,  -83,  -81,  -78,  -76,  -74,  -71,  -69,  -67,  -64,  -62,  -59,  -57,  -54,  -51,  -49,
+     -46,  -43,  -40,  -38,  -35,  -32,  -29,  -26,  -23,  -21,  -18,  -15,  -12,   -9,   -6,   -3,
+};
+static inline int sin_lookup(int angle){ // angle 0..255 -> 0..2pi
+    return sin_table[angle & 0xFF];
+}
+
+static void draw_bliss_wallpaper(void){
+    int w = fb_get_width();
+    int h = fb_get_height();
+    int sky_h = h * 60 / 100; // upper 60% sky
+    int hill_base = sky_h; // hills start at 60% from top
+    // Sky gradient - brighter blue top (0x0087CEEB sky blue) to pale near horizon (0x00B0E0E6 powder blue)
+    // Chose vertical per-row lerp: 460 rows * 1024 cols = 471k writes, same as before, 460 lerps
+    uint32_t sky_top = 0x0087CEEB;
+    uint32_t sky_bot = 0x00B0E0E6;
+    uint8_t top_r = (sky_top>>16)&0xFF, top_g=(sky_top>>8)&0xFF, top_b=sky_top&0xFF;
+    uint8_t bot_r = (sky_bot>>16)&0xFF, bot_g=(sky_bot>>8)&0xFF, bot_b=sky_bot&0xFF;
+    for(int y=0; y<sky_h; y++){
+        int ratio = (y * 255) / (sky_h - 1);
+        uint8_t r = top_r + ((bot_r - top_r)*ratio)/255;
+        uint8_t g = top_g + ((bot_g - top_g)*ratio)/255;
+        uint8_t b = top_b + ((bot_b - top_b)*ratio)/255;
+        uint32_t col = (r<<16)|(g<<8)|b;
+        fb_draw_rect(0, y, w, 1, col);
+    }
+    // Fill below horizon with sky bottom before hills - ensures no 35px black gap if hill_base+offset > sky_h
+    // Without this, gap 460..far_y-1 (up to 35px) remains untouched (black) when base=35
+    fb_draw_rect(0, sky_h, w, h - sky_h, 0x00B0E0E6); // sky_bot solid under hills
+    // Hills will overwrite this sky_bot area from far_y/near_y down, leaving only visible hill silhouette
+    // Sun - filled pale yellow/white at upper right, radius 40 at 800,120
+    gfx_draw_filled_circle(800, 120, 40, 0x00FFFFE0); // light yellow
+    gfx_draw_filled_circle(800, 120, 35, 0x00FFFFFF); // white center for highlight
+
+    // Hills - two gentle layers for depth, low frequency for wide rolling (Bliss has 2-3 broad curves across 1024px, not sawtooth)
+    // Trace addresses: hill_base = sky_h = 460 (h=768*60/100), sky GRAD filled y=0..459 (460 rows), hills fill y=far_y..767
+    // Previously far_phase=(x*2)&0xFF period 128 (8 hills) and near_phase=(x*3)&0xFF period 85 (12 hills) => sawtooth many bumps;
+    // seam at x~170-260 was NOT a delta>1 discontinuity (max was 1-2) but visual choppiness + 35px base offset leaving black gap
+    // Now use period 600 far (1024/600≈1.71 hills) and 400 near (≈2.56 hills) with DIFFERENT freq so layers don't align, gentle
+    // Phase = x*256/period &0xFF, hill_y = sky_h + baseOff + amp*sin/128, baseOff small so hills touch horizon (y≈sky_h)
+    // Address trace: fb at 0xFD000000, back buffer 0x00A00000, per-column 1x(h-y) writes 1024*~300 avg = 300k pixels, no overlap gap
+    uint32_t far_green = 0x0090C060; // lighter far
+    uint32_t near_green = 0x0030A030; // darker near - Bliss meadow
+    for(int x=0; x<w; x++){
+        int far_phase = (x * 256 / 600) & 0xFF; // period 600 - gentle 1.7x across width
+        int near_phase = (x * 256 / 400) & 0xFF; // period 400 - 2.56x, different from far
+        int far_y = hill_base + 8 + (sin_lookup(far_phase) * 18 >> 7); // base 8, amp 18 => range 460±16, touches horizon
+        int near_y = hill_base + 32 + (sin_lookup(near_phase) * 30 >> 7); // base 32, amp 30 => range 460+2..62, in front of far
+        // Subtle second wave for organic rolling, different offset/amp per layer to avoid identical alignment
+        far_y += (sin_lookup((far_phase+70)&0xFF) * 6 >> 7);  // +±5
+        near_y += (sin_lookup((near_phase+50)&0xFF) * 10 >> 7); // +±9
+        if(far_y < sky_h) far_y = sky_h;
+        if(far_y > h-1) far_y = h-1;
+        if(near_y < sky_h) near_y = sky_h;
+        if(near_y > h-1) near_y = h-1;
+        if(far_y > near_y) far_y = near_y; // far stays behind near
+        fb_draw_rect(x, far_y, 1, h - far_y, far_green);
+        fb_draw_rect(x, near_y, 1, h - near_y, near_green);
+    }
+    // Clouds - 3 clusters of 3-4 overlapping white circles, cheap, in sky area (y < sky_h)
+    // Cluster 1 at 180,80
+    gfx_draw_filled_circle(180, 80, 28, 0x00FFFFFF);
+    gfx_draw_filled_circle(210, 70, 22, 0x00FFFFFF);
+    gfx_draw_filled_circle(240, 85, 18, 0x00FFFFFF);
+    gfx_draw_filled_circle(160, 90, 15, 0x00FFFFFF);
+    // Cluster 2 at 500,100
+    gfx_draw_filled_circle(500, 100, 30, 0x00FFFFFF);
+    gfx_draw_filled_circle(530, 85, 20, 0x00FFFFFF);
+    gfx_draw_filled_circle(470, 95, 18, 0x00FFFFFF);
+    gfx_draw_filled_circle(550, 105, 14, 0x00FFFFFF);
+    // Cluster 3 at 850,90
+    gfx_draw_filled_circle(850, 90, 26, 0x00FFFFFF);
+    gfx_draw_filled_circle(880, 75, 18, 0x00FFFFFF);
+    gfx_draw_filled_circle(820, 80, 16, 0x00FFFFFF);
+}
+
+static void wallpaper_cache_build_once(void){
+    // Called once at init: draw Bliss wallpaper into fb_back then snapshot to wallpaper_cache
+    if(wallpaper_cache_ready) return;
+    if(!wallpaper_cache_alloc()) return;
+    // Build into back buffer first (fb_back is current fb_target)
+    uint64_t t0 = rdtsc();
+    draw_bliss_wallpaper();
+    uint64_t t1 = rdtsc();
+    wallpaper_build_cycles = t1 - t0;
+    // Snapshot: back -> cache (rep movsl 786432 dwords)
+    uint32_t *src = fb_get_back_buffer();
+    uint32_t *dst = wallpaper_cache;
+    uint32_t dwords = wallpaper_cache_bytes / 4;
+    __asm__ volatile("cld; rep movsl" : "+S"(src), "+D"(dst), "+c"(dwords) : : "memory");
+    wallpaper_cache_ready = 1;
+    s_puts("WALLPAPER: built once cycles "); s_put_cycles(wallpaper_build_cycles);
+    s_puts(" (~"); s_put_dec((uint32_t)wallpaper_build_cycles/3000); s_puts(" us @3GHz) bytes "); s_put_dec(wallpaper_cache_bytes); s_puts("\n");
+    {
+        int w = fb_get_width(); int h = fb_get_height(); int sky_h = h*60/100;
+        int black=0, magenta=0; for(int x=0;x<w;x++) { uint32_t p=fb_get_pixel(x,sky_h); if(p==0x000000U) black++; if(p==0x00FF00FFU) magenta++; }
+        s_puts("WALLPAPER HORIZON y="); s_put_dec(sky_h); s_puts(" black="); s_put_dec(black); s_puts(" magenta="); s_put_dec(magenta); s_puts("/"); s_put_dec(w);
+        s_puts(magenta==w ? " MAGENTA DEBUG LINE ACTIVE\n" : black==w ? " FULL BLACK LINE!\n" : black==0 ? " clean (no divider)\n" : " scattered\n");
+        s_puts(" samples y=460 x0="); s_put_hex32(fb_get_pixel(0,sky_h)); s_puts(" x512="); s_put_hex32(fb_get_pixel(512,sky_h)); s_puts("\n");
+    }
+    // Also measure old flat gradient for comparison (draw to back, then restore wallpaper)
+    uint64_t g0 = rdtsc();
+    draw_desktop_gradient();
+    uint64_t g1 = rdtsc();
+    s_puts("WALLPAPER: old flat gradient cycles "); s_put_cycles(g1 - g0);
+    s_puts(" (~"); s_put_dec((uint32_t)(g1 - g0)/3000); s_puts(" us)\n");
+    // Restore wallpaper to back (since we just overwrote back with flat gradient measurement)
+    fb_blit_from(wallpaper_cache);
+    // Measure blit cost also
+    uint64_t b0 = rdtsc();
+    fb_blit_from(wallpaper_cache);
+    uint64_t b1 = rdtsc();
+    s_puts("WALLPAPER: cached blit cycles "); s_put_cycles(b1 - b0);
+    s_puts(" (~"); s_put_dec((uint32_t)(b1 - b0)/3000); s_puts(" us) vs Bliss recompute "); s_put_cycles(wallpaper_build_cycles); s_puts(" -> speedup x"); s_put_dec((uint32_t)wallpaper_build_cycles / ((uint32_t)(b1-b0)==0?1:(uint32_t)(b1-b0))); s_puts("\n");
+}
+
 void window_manager_draw_all(void){
     if(!fb_is_available()) return;
-    fb_fill(0x00112244);
+    uint64_t t_wall0=0, t_wall1=0;
+    if(wallpaper_cache_ready){
+        t_wall0 = rdtsc();
+        wallpaper_blit_cached();
+        t_wall1 = rdtsc();
+        last_wallpaper_cycles = t_wall1 - t_wall0;
+    } else {
+        t_wall0 = rdtsc();
+        draw_bliss_wallpaper();
+        t_wall1 = rdtsc();
+        last_wallpaper_cycles = t_wall1 - t_wall0;
+        s_puts("WALLPAPER: uncached draw cycles "); s_put_cycles(last_wallpaper_cycles); s_puts("\n");
+    }
+    uint64_t t_win0 = rdtsc();
     for(int i=0;i<window_count;i++){
         int idx = z_order[i];
         if(windows[idx].minimized) continue;
         window_draw_single(idx);
     }
     taskbar_draw();
+    uint64_t t_win1 = rdtsc();
+    last_windows_cycles = t_win1 - t_win0;
     s_puts("WM: drew windows back->front z=[");
     for(int i=0;i<window_count;i++){ s_put_dec(z_order[i]); if(i<window_count-1) s_putc(','); }
     s_puts("] minimized: ");
     for(int i=0;i<window_count;i++){ s_put_dec(windows[i].minimized); if(i<window_count-1) s_putc(','); }
     s_puts("\n");
+    // Per-frame breakdown (wallpaper vs windows) is logged in window_do_redraw, not here to keep serial clean
 }
 
 
@@ -438,7 +721,17 @@ void window_do_redraw(void){
     if((g_redraw_count % 10)==0){
         s_puts("WM_REDRAW #"); s_put_dec(g_redraw_count);
         s_puts(" cycles "); s_put_dec((uint32_t)(t1-t0));
-        s_puts(" PMM free "); s_put_dec(pmm_free_frames());
+        s_puts(" [wallpaper "); s_put_dec((uint32_t)last_wallpaper_cycles);
+        s_puts(" win "); s_put_dec((uint32_t)last_windows_cycles);
+        s_puts("] PMM free "); s_put_dec(pmm_free_frames());
+        s_puts("\n");
+    }
+    // Log first few drags separately for lag diagnosis (always, not only %10)
+    if(g_redraw_count < 6){
+        s_puts("WM_REDRAW breakdown #"); s_put_dec(g_redraw_count);
+        s_puts(" total "); s_put_dec((uint32_t)(t1-t0));
+        s_puts(" wallpaper "); s_put_dec((uint32_t)last_wallpaper_cycles);
+        s_puts(" windows "); s_put_dec((uint32_t)last_windows_cycles);
         s_puts("\n");
     }
     g_in_redraw = 0;

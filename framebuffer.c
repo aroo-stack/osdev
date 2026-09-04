@@ -176,6 +176,41 @@ void fb_draw_rect(uint32_t x, uint32_t y, uint32_t w, uint32_t h, uint32_t color
 
 static uint32_t fb_swap_count = 0;
 
+// Wait for start of vblank: NOT in retrace -> retrace starts
+// 0x3DA bit 3 = vertical retrace (1 = in retrace) - standard VGA status
+// With timeout to avoid hang if QEMU VBE doesn't emulate retrace toggling
+static inline void wait_for_vblank(void){
+    // Wait for NOT in retrace (if already in retrace, wait out)
+    for(int i=0;i<100000;i++){
+        if((inb(0x3DA) & 0x08)==0) break;
+    }
+    // Wait for retrace to START
+    for(int i=0;i<100000;i++){
+        if(inb(0x3DA) & 0x08) break;
+    }
+}
+
+uint32_t* fb_get_back_buffer(void){ return fb_back; }
+uint32_t* fb_get_front_buffer(void){ return fb_front; }
+uint32_t fb_get_front_pixel(uint32_t x, uint32_t y){
+    if(!fb_available || !fb_front) return 0;
+    if(x >= fb_width || y >= fb_height) return 0;
+    uint8_t *row = (uint8_t*)fb_front + y * fb_pitch;
+    uint32_t *pixel = (uint32_t*)(row + x*4);
+    return *pixel;
+}
+uint32_t fb_get_size_bytes(void){ return fb_size_bytes; }
+void fb_blit_from(uint32_t *src){
+    if(!fb_available || !double_buffered || !fb_back || !src) return;
+    uint32_t *dst = fb_back;
+    uint32_t dwords = fb_size_bytes / 4;
+    __asm__ volatile("cld; rep movsl" : "+S"(src), "+D"(dst), "+c"(dwords) : : "memory");
+}
+
+// Known limitation: no hardware vsync/page-flip support, so occasional screen tearing (a thin visible line)
+// can appear at the display's refresh boundary during redraws. Attempted 0x3DA vblank polling did not reliably
+// eliminate this under QEMU's VBE emulation. Would require hardware page-flipping or a different framebuffer
+// architecture to fully fix - out of scope for now.
 void fb_swap(void){
     if(!fb_available || !double_buffered || !fb_back || !fb_front) return;
     fb_swap_count++;
@@ -191,6 +226,10 @@ void fb_swap(void){
     // Doing cli here when caller already did cli would cause nested cli/sti mismatch:
     // inner sti would re-enable interrupts prematurely while outer still expects disabled, causing re-entrancy
     // and stack overflow after many drag moves (~3 sec). So just do the copy with current interrupt state.
+    // --- vsync: wait for start of vblank before copy to reduce tearing ---
+    // Standard pattern: wait NOT in retrace, then wait for retrace START, then copy during blank.
+    // Timeout prevents hang if QEMU std/VBE doesn't toggle 0x3DA bit 3.
+    wait_for_vblank();
     uint32_t *src = fb_back;
     uint32_t *dst = fb_front;
     uint32_t dwords = fb_size_bytes / 4;

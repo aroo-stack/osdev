@@ -53,6 +53,31 @@ void gfx_draw_circle(int cx, int cy, int r, uint32_t color){
     }
 }
 
+static int isqrt(int x){
+    if(x <= 0) return 0;
+    int r = 0;
+    // binary search for speed
+    int lo = 0, hi = x;
+    if(hi > 46340) hi = 46340;
+    while(lo <= hi){
+        int mid = (lo + hi) >> 1;
+        int sq = mid * mid;
+        if(sq == x) return mid;
+        if(sq < x) lo = mid + 1;
+        else hi = mid - 1;
+    }
+    return hi;
+}
+
+void gfx_draw_filled_circle(int cx, int cy, int r, uint32_t color){
+    if(r<=0) return;
+    // Fill via horizontal scanlines - integer sqrt, no libm
+    for(int dy=-r; dy<=r; dy++){
+        int dx = isqrt(r*r - dy*dy);
+        fb_draw_rect(cx - dx, cy + dy, 2*dx+1, 1, color);
+    }
+}
+
 void gfx_draw_char(int x, int y, char c, uint32_t color){
     unsigned char uc = (unsigned char)c;
     if(uc >= 128) return;

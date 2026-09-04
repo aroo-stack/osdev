@@ -14,5 +14,10 @@ int fb_is_available(void);
 // double buffering
 int fb_is_double_buffered(void);
 void fb_swap(void); // copy back buffer to front (visible)
+uint32_t* fb_get_back_buffer(void);
+uint32_t* fb_get_front_buffer(void);
+uint32_t fb_get_front_pixel(uint32_t x, uint32_t y);
+uint32_t fb_get_size_bytes(void);
+void fb_blit_from(uint32_t *src); // fast copy src (size fb_size_bytes) -> back buffer
 
 #endif
