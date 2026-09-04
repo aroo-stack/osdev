@@ -18,6 +18,11 @@ static int z_order[MAX_WINDOWS]; // indices sorted back->front
 static int dragging = 0;
 static int drag_win = -1;
 static int drag_off_x = 0, drag_off_y = 0;
+// resize state - Phase 14
+static int resizing = 0;
+static int resize_win = -1;
+static int resize_off_x = 0, resize_off_y = 0;
+static int resize_start_w = 0, resize_start_h = 0;
 // instrumentation for Phase 11 double-buffer freeze investigation
 volatile int g_in_redraw = 0;
 static int g_redraw_count = 0;
@@ -122,6 +127,15 @@ static void window_draw_single(int idx){
     window_draw_button(w);
     // textbox if any
     window_draw_textbox(w);
+    // resize handle - 12x12 at bottom-right, diagonal grip
+    {
+        int rx = w->x + w->w - RESIZE_HANDLE;
+        int ry = w->y + w->h - RESIZE_HANDLE;
+        fb_draw_rect(rx, ry, RESIZE_HANDLE, RESIZE_HANDLE, 0x00888888);
+        gfx_draw_rect_outline(rx, ry, RESIZE_HANDLE, RESIZE_HANDLE, 0x00000000);
+        gfx_draw_line(rx+4, ry+8, rx+8, ry+4, 0x00000000);
+        gfx_draw_line(rx+6, ry+8, rx+8, ry+6, 0x00000000);
+    }
 }
 
 void taskbar_draw(void){
@@ -310,6 +324,76 @@ int window_is_in_title_bar(int idx, int x, int y){
     struct window *w = &windows[idx];
     if(w->minimized) return 0;
     return (x >= w->x && x < w->x + w->w && y >= w->y && y < w->y + TITLE_BAR_H);
+}
+
+int window_is_in_resize_handle(int idx, int x, int y){
+    if(idx<0||idx>=window_count) return 0;
+    struct window *w = &windows[idx];
+    if(w->minimized) return 0;
+    int rx = w->x + w->w - RESIZE_HANDLE;
+    int ry = w->y + w->h - RESIZE_HANDLE;
+    return (x >= rx && x < w->x + w->w && y >= ry && y < w->y + w->h);
+}
+
+int window_is_resizing(void){ return resizing; }
+
+int window_start_resize(int x, int y){
+    int idx = window_find_at(x,y);
+    if(idx==-1) return 0;
+    if(!window_is_in_resize_handle(idx,x,y)) return 0;
+    struct window *w = &windows[idx];
+    resize_off_x = x - (w->x + w->w);
+    resize_off_y = y - (w->y + w->h);
+    resize_win = idx;
+    resizing = 1;
+    resize_start_w = w->w;
+    resize_start_h = w->h;
+    s_puts("WM: resize start Window "); s_put_dec(idx+1);
+    s_puts(" offset "); s_put_dec(resize_off_x); s_putc(','); s_put_dec(resize_off_y);
+    s_puts(" size "); s_put_dec(w->w); s_putc('x'); s_put_dec(w->h); s_puts("\n");
+    window_bring_to_front(idx);
+    return 1;
+}
+
+void window_update_resize(int x, int y){
+    if(!resizing || resize_win==-1) return;
+    struct window *w = &windows[resize_win];
+    int new_w = (x - resize_off_x) - w->x;
+    int new_h = (y - resize_off_y) - w->y;
+    // Enforce minimum - per-window based on content so button/textbox stay inside
+    // Stay at same relative offset from top-left, don't scale them; clamp min high enough
+    int min_w = WIN_MIN_W;
+    int min_h = WIN_MIN_H;
+    if(w->has_button){
+        int need_w = w->btn.x + w->btn.w + 10;
+        if(need_w > min_w) min_w = need_w;
+        int need_h = w->btn.y + w->btn.h + 10;
+        if(need_h > min_h) min_h = need_h;
+    }
+    if(w->has_textbox){
+        int need_w2 = w->tbox.x + w->tbox.w + 10;
+        if(need_w2 > min_w) min_w = need_w2;
+        int need_h2 = w->tbox.y + w->tbox.h + 10;
+        if(need_h2 > min_h) min_h = need_h2;
+    }
+    if(new_w < min_w) new_w = min_w;
+    if(new_h < min_h) new_h = min_h;
+    int max_w = (int)fb_get_width() - w->x;
+    int max_h = (int)fb_get_height() - TASKBAR_H - w->y;
+    if(new_w > max_w) new_w = max_w;
+    if(new_h > max_h) new_h = max_h;
+    if(new_w == w->w && new_h == w->h) return;
+    w->w = new_w;
+    w->h = new_h;
+    g_needs_redraw = 1;
+}
+
+void window_end_resize(void){
+    if(!resizing) return;
+    s_puts("WM: resize end Window "); s_put_dec(resize_win+1);
+    s_puts(" now "); s_put_dec(windows[resize_win].w); s_putc('x'); s_put_dec(windows[resize_win].h); s_puts("\n");
+    resizing = 0;
+    resize_win = -1;
 }
 
 int window_handle_minimize_click(int x, int y){

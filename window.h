@@ -7,6 +7,9 @@
 #define TASKBAR_H 30
 #define MINIMIZE_BTN_W 16
 #define MINIMIZE_BTN_H 16
+#define RESIZE_HANDLE 12
+#define WIN_MIN_W 150
+#define WIN_MIN_H 100
 
 struct button {
     int x, y, w, h; // relative to parent window origin (0,0 = window top-left)
@@ -70,5 +73,11 @@ void taskbar_draw(void);
 int window_handle_minimize_click(int x, int y); // hit minimize "_" in title bar, toggles minimized
 int window_handle_taskbar_click(int x, int y); // hit taskbar tab, unminimize or bring to front
 int window_is_minimized(int idx);
+// resize - Phase 14
+int window_is_in_resize_handle(int idx, int x, int y);
+int window_start_resize(int x, int y);
+void window_update_resize(int x, int y);
+void window_end_resize(void);
+int window_is_resizing(void);
 
 #endif
