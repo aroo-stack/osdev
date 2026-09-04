@@ -201,8 +201,8 @@ void window_manager_init(void){
     windows[1].z = 1;
     windows[1].has_button = 0;
     windows[1].has_textbox = 1;
-    windows[1].tbox.x = 20; windows[1].tbox.y = 40; windows[1].tbox.w = 360; windows[1].tbox.h = 30;
-    windows[1].tbox.max_len = 60;
+    windows[1].tbox.x = 20; windows[1].tbox.y = 40; windows[1].tbox.w = 360; windows[1].tbox.h = 60; // taller to show 5 lines (was 30 for 2 lines)
+    windows[1].tbox.max_len = 512;
     windows[1].tbox.len = 0;
     windows[1].tbox.buffer[0]=0;
     windows[1].tbox.focused = 0;
@@ -280,7 +280,17 @@ int window_bring_to_front(int idx){
 void window_set_needs_redraw(void){ g_needs_redraw = 1; }
 int window_needs_redraw(void){ return g_needs_redraw; }
 void window_do_redraw(void){
-    if(!g_needs_redraw) return;
+    if(g_in_redraw){
+        // Re-entrancy detected - this should not happen if main loop is the only caller and it checks g_needs_redraw with cli
+        // Log it
+        s_puts("WM_REDRAW re-entry!\n");
+        return;
+    }
+    __asm__ volatile("cli");
+    if(!g_needs_redraw){
+        __asm__ volatile("sti");
+        return;
+    }
     g_needs_redraw = 0;
     g_in_redraw = 1;
     uint64_t t0 = rdtsc();
@@ -298,6 +308,7 @@ void window_do_redraw(void){
         s_puts("\n");
     }
     g_in_redraw = 0;
+    __asm__ volatile("sti");
 }
 
 
@@ -606,7 +617,7 @@ void window_handle_key(char c){
         return;
     }
     if(c=='\n' || c=='\r') return;
-    if(tb->len >= tb->max_len -1) return;
+    if(tb->len >= tb->max_len) return;
     tb->buffer[tb->len++]=c;
     tb->buffer[tb->len]=0;
     s_puts("TBOX: typed '"); s_putc(c); s_puts("' len "); s_put_dec(tb->len); s_puts(" Window "); s_put_dec(fidx+1); s_puts("\n");

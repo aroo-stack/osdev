@@ -20,7 +20,7 @@ struct button {
 
 struct textbox {
     int x, y, w, h; // relative to parent window origin
-    char buffer[64];
+    char buffer[513]; // 512 + null
     int len;
     int max_len;
     int focused;
