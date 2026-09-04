@@ -12,6 +12,16 @@ struct button {
     int clicks;
 };
 
+struct textbox {
+    int x, y, w, h; // relative to parent window origin
+    char buffer[64];
+    int len;
+    int max_len;
+    int focused;
+    int cursor_visible;
+    int blink_counter;
+};
+
 struct window {
     int x, y, w, h;
     char title[32];
@@ -22,6 +32,8 @@ struct window {
     int z; // 0 = back, higher = front
     struct button btn;
     int has_button;
+    struct textbox tbox;
+    int has_textbox;
 };
 
 void window_manager_init(void);
@@ -43,5 +55,11 @@ void window_do_redraw(void);
 // button - Phase 12
 int window_handle_button_down(int x, int y); // returns 1 if hit button
 int window_handle_button_up(int x, int y); // returns 1 if click completed (incremented)
+// textbox - Phase 12
+int window_handle_textbox_click(int x, int y); // focus handling, returns 1 if hit
+void window_handle_key(char c); // append char if focused textbox exists
+void window_handle_backspace(void);
+void window_tick_cursor(void); // called from main loop to blink
+int window_handle_scancode(uint8_t scancode); // translate scancode -> key, returns 1 if handled (focused textbox existed)
 
 #endif

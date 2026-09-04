@@ -271,8 +271,10 @@ void kernel_main(uint32_t magic, uint32_t mbi_addr) {
     // Uncomment to test exception handling (should print EXCEPTION and halt):
     // volatile int a = 1; volatile int b = 0; volatile int c = a / b; (void)c;
 
-    // Main loop - deferred window redraw runs outside IRQ (fixes freeze: previously window_update_drag did full 3MB redraw inside IRQ12 with cli, blocking timer/keyboard)
+    // Main loop - deferred window redraw runs outside IRQ (fixes freeze)
+    // Cursor blink handled here: window_tick_cursor toggles every ~20 redraws/idle ticks and sets needs_redraw
     for (;;) {
+        window_tick_cursor();
         if(window_needs_redraw()){
             window_do_redraw();
         }

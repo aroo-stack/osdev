@@ -1,5 +1,6 @@
 #include "idt.h"
 #include "mouse.h"
+#include "window.h"
 #include <stdint.h>
 #include <stddef.h>
 
@@ -174,11 +175,34 @@ void irq_handler(struct regs *r) {
     if (r->int_no == 33) { // IRQ1 keyboard - vector 33 = 0x20+1
         uint8_t scancode = inb(0x60);
         outb(0x20, 0x20);
-        // Filter spurious ACKs that leak from mouse 8042 init (observed: 0xFA after 0xF4, and 0x41 command byte echo after 0xA8 with double buffer timing)
-        // These are not real key presses; ignore to avoid confusion. Also filter 0x41 which appeared once after double buffer alloc.
-        if(scancode==0xFA || scancode==0xFE || scancode==0x41) {
-            // Optionally log but not as KEY
-            // serial_puts("KEY filtered spurious 0x"); serial_put_hex(scancode); s_puts("\n");
+        // Filter spurious ACKs that leak from mouse 8042 init
+        if(scancode==0xFA || scancode==0xFE) {
+            return;
+        }
+        // For textbox: translate scancode to ASCII (cheap, runs in IRQ) and defer redraw to main loop
+        // This follows IRQ lesson: do minimal work in ISR (translate+append), heavy draw deferred
+        // Trace a few: 0x1E='a' (00011110), 0x30='b' (00110000), 0x39=' ' (00111001) per OSDev Set 1
+        if(scancode & 0x80){
+            // key release - ignore for Phase 12 (only handle press)
+            return;
+        }
+        // Try textbox handling first - if focused textbox exists, it consumes the key
+        // window_handle_scancode will check focused textbox and append if valid, and set needs_redraw
+        // It returns 1 if it handled the key (even if it did nothing due to unmapped scancode, we still consider it handled to avoid double logging)
+        // To keep old scancode logging for unfocused case, we check if there is a focused textbox
+        int has_focused = 0;
+        // Quick check: is any textbox focused?
+        // We can call window_handle_scancode which will internally check focused and do translation
+        // For Phase 12, we want: if textbox focused, keys go there and not to scancode log; else log scancode as before
+        // So we need to know if there is a focused textbox before deciding to log
+        // Peek: we can check via a helper or just try to handle and see if it consumed
+        // For now, try to handle via window_handle_scancode, which will return 1 if it consumed (valid ASCII or backspace)
+        // If it returns 0 (no focused textbox or unmapped scancode), fall through to old logging
+        extern int window_handle_scancode(uint8_t scancode);
+        int handled = window_handle_scancode(scancode);
+        if(handled){
+            // Also log for debugging that key was handled by textbox
+            // But not as KEY scancode, as MOUSE-like debug
             return;
         }
         serial_puts("KEY scancode=");

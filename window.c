@@ -62,6 +62,36 @@ static void window_draw_button(struct window *w){
     gfx_draw_string(tx, ty, w->btn.label, fg);
 }
 
+static void window_draw_textbox(struct window *w){
+    if(!w->has_textbox) return;
+    int ax = w->x + w->tbox.x;
+    int ay = w->y + w->tbox.y;
+    uint32_t bg = 0x00FFFFFF; // white
+    uint32_t border = w->tbox.focused ? 0x000000FF : 0x00888888; // blue when focused, gray otherwise
+    uint32_t textcol = 0x00000000; // black text
+    fb_draw_rect(ax, ay, w->tbox.w, w->tbox.h, bg);
+    gfx_draw_rect_outline(ax, ay, w->tbox.w, w->tbox.h, border);
+    // draw text inside, clipped, with 4px padding
+    int tx = ax + 4;
+    int ty = ay + (w->tbox.h - 8)/2;
+    // clip to textbox width -4
+    char tmp[65];
+    int len = w->tbox.len;
+    if(len > 60) len = 60;
+    for(int i=0;i<len;i++) tmp[i]=w->tbox.buffer[i];
+    tmp[len]=0;
+    gfx_draw_string(tx, ty, tmp, textcol);
+    // blinking cursor at end of text when focused
+    if(w->tbox.focused && w->tbox.cursor_visible){
+        int cx = tx + len*8;
+        int cy = ty;
+        // vertical line 1px wide, 8px tall
+        for(int dy=0; dy<8; dy++) fb_put_pixel(cx, cy+dy, 0x00000000);
+        fb_put_pixel(cx+1, cy, 0x00000000);
+        fb_put_pixel(cx+1, cy+7, 0x00000000);
+    }
+}
+
 static void window_draw_single(int idx){
     struct window *w = &windows[idx];
     if(!w->visible) return;
@@ -76,6 +106,8 @@ static void window_draw_single(int idx){
     gfx_draw_string(w->x+6, w->y+6, w->title, 0x00FFFFFF);
     // button if any
     window_draw_button(w);
+    // textbox if any
+    window_draw_textbox(w);
 }
 
 void window_manager_init(void){
@@ -109,6 +141,14 @@ void window_manager_init(void){
     windows[1].visible = 1;
     windows[1].z = 1;
     windows[1].has_button = 0;
+    windows[1].has_textbox = 1;
+    windows[1].tbox.x = 20; windows[1].tbox.y = 40; windows[1].tbox.w = 360; windows[1].tbox.h = 30;
+    windows[1].tbox.max_len = 60;
+    windows[1].tbox.len = 0;
+    windows[1].tbox.buffer[0]=0;
+    windows[1].tbox.focused = 0;
+    windows[1].tbox.cursor_visible = 1;
+    windows[1].tbox.blink_counter = 0;
 
     windows[2].x = 400; windows[2].y = 250; windows[2].w = 350; windows[2].h = 250;
     w_strcpy(windows[2].title, "Window 3", 32);
@@ -334,5 +374,117 @@ int window_handle_button_up(int x, int y){
         s_puts("BTN: release outside Window "); s_put_dec(pressed_idx+1); s_puts("\n");
     }
     g_needs_redraw = 1;
+    return 1;
+}
+
+// --- Phase 12 textbox + keyboard ---
+static int textbox_hit_test(int win_idx, int x, int y){
+    if(win_idx<0||win_idx>=window_count) return 0;
+    struct window *w=&windows[win_idx];
+    if(!w->has_textbox) return 0;
+    int ax=w->x + w->tbox.x;
+    int ay=w->y + w->tbox.y;
+    return (x>=ax && x<ax+w->tbox.w && y>=ay && y<ay+w->tbox.h);
+}
+
+int window_handle_textbox_click(int x, int y){
+    int idx = window_find_at(x,y);
+    if(idx==-1) {
+        // click on desktop -> unfocus all
+        int had=0;
+        for(int i=0;i<window_count;i++) if(windows[i].has_textbox && windows[i].tbox.focused) had=1;
+        for(int i=0;i<window_count;i++) if(windows[i].has_textbox) windows[i].tbox.focused=0;
+        if(had){ s_puts("TBOX: unfocus all (desktop)\n"); g_needs_redraw=1; }
+        return 0;
+    }
+    // check if click inside textbox of that window
+    if(!textbox_hit_test(idx,x,y)){
+        // click inside window but outside textbox -> unfocus this window's textbox if it was focused? Keep focus only if click inside textbox
+        // For Phase 12, clicking elsewhere in window should unfocus textbox (only one focused at a time)
+        int had_focus = 0;
+        for(int i=0;i<window_count;i++) if(windows[i].has_textbox && windows[i].tbox.focused) had_focus=1;
+        for(int i=0;i<window_count;i++) if(windows[i].has_textbox) windows[i].tbox.focused=0;
+        if(had_focus){ s_puts("TBOX: click outside textbox, unfocus\n"); g_needs_redraw=1; }
+        return 0;
+    }
+    // hit textbox - focus this, unfocus others
+    for(int i=0;i<window_count;i++) if(windows[i].has_textbox) windows[i].tbox.focused=(i==idx);
+    windows[idx].tbox.cursor_visible=1;
+    windows[idx].tbox.blink_counter=0;
+    s_puts("TBOX: focus Window "); s_put_dec(idx+1); s_puts("\n");
+    // also bring window to front if not already
+    int pos=-1; for(int i=0;i<window_count;i++) if(z_order[i]==idx) pos=i;
+    if(pos != window_count-1){
+        for(int i=pos;i<window_count-1;i++) z_order[i]=z_order[i+1];
+        z_order[window_count-1]=idx;
+        for(int i=0;i<window_count;i++) windows[z_order[i]].z=i;
+    }
+    g_needs_redraw=1;
+    return 1;
+}
+
+void window_handle_key(char c){
+    // find focused textbox
+    int fidx=-1;
+    for(int i=0;i<window_count;i++) if(windows[i].has_textbox && windows[i].tbox.focused) fidx=i;
+    if(fidx==-1) return;
+    struct textbox *tb=&windows[fidx].tbox;
+    if(c=='\b'){
+        if(tb->len>0){ tb->len--; tb->buffer[tb->len]=0; s_puts("TBOX: backspace len "); s_put_dec(tb->len); s_puts("\n"); g_needs_redraw=1; }
+        return;
+    }
+    if(c=='\n' || c=='\r') return;
+    if(tb->len >= tb->max_len -1) return;
+    tb->buffer[tb->len++]=c;
+    tb->buffer[tb->len]=0;
+    s_puts("TBOX: typed '"); s_putc(c); s_puts("' len "); s_put_dec(tb->len); s_puts(" Window "); s_put_dec(fidx+1); s_puts("\n");
+    g_needs_redraw=1;
+}
+
+void window_handle_backspace(void){
+    window_handle_key('\b');
+}
+
+void window_tick_cursor(void){
+    // Called from main loop to blink - toggle every N redraws
+    // We use a simple counter: toggle every 20 ticks (~0.5s if called at ~40Hz main loop)
+    // Choice: redraw-cycle vs PIT ticks - we don't have PIT unmasked, so use main loop iterations
+    // Main loop runs hlt + check, wakes on any IRQ (mouse/keyboard). For idle blink, we need periodic wakeups.
+    // Since PIT is masked (master 0xF9), no periodic wakeup. So we blink on every redraw that happens due to input.
+    // For true idle blink, we would need PIT. For now, blink every 20 redraws is visible during typing/movement.
+    for(int i=0;i<window_count;i++) if(windows[i].has_textbox && windows[i].tbox.focused){
+        windows[i].tbox.blink_counter++;
+        if(windows[i].tbox.blink_counter >= 20){
+            windows[i].tbox.blink_counter=0;
+            windows[i].tbox.cursor_visible ^= 1;
+            g_needs_redraw=1;
+        }
+    }
+}
+
+static const char scancode_map[128] = {
+    [0x02]='1', [0x03]='2', [0x04]='3', [0x05]='4', [0x06]='5', [0x07]='6', [0x08]='7', [0x09]='8', [0x0A]='9', [0x0B]='0',
+    [0x10]='q', [0x11]='w', [0x12]='e', [0x13]='r', [0x14]='t', [0x15]='y', [0x16]='u', [0x17]='i', [0x18]='o', [0x19]='p',
+    [0x1E]='a', [0x1F]='s', [0x20]='d', [0x21]='f', [0x22]='g', [0x23]='h', [0x24]='j', [0x25]='k', [0x26]='l',
+    [0x2C]='z', [0x2D]='x', [0x2E]='c', [0x2F]='v', [0x30]='b', [0x31]='n', [0x32]='m',
+    [0x39]=' ', [0x0E]=0, // backspace handled separately
+};
+// Use scancode_map for translation
+
+int window_handle_scancode(uint8_t scancode){
+    // Check if any textbox is focused - if none, let caller fall through to scancode logging
+    int has_focused = 0;
+    for(int i=0;i<window_count;i++) if(windows[i].has_textbox && windows[i].tbox.focused) { has_focused=1; break; }
+    if(!has_focused) return 0;
+    // Ignore release (high bit set) - only translate press
+    if(scancode & 0x80) return 1; // still considered handled (focused, but release ignored)
+    if(scancode == 0x0E){ // backspace make
+        window_handle_backspace();
+        return 1;
+    }
+    char c = 0;
+    if(scancode < 128) c = scancode_map[scancode];
+    if(!c) return 1; // unmapped but focused, consume it (don't log as KEY)
+    window_handle_key(c);
     return 1;
 }

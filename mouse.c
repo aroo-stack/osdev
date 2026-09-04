@@ -230,7 +230,8 @@ void mouse_handle_byte(uint8_t data){
                 window_start_drag(new_x, new_y);
             } else if(window_handle_button_down(new_x, new_y)){
                 // button hit - handled (bring to front + pressed visual)
-                // window_handle_button_down already did full redraw with cursor
+            } else if(window_handle_textbox_click(new_x, new_y)){
+                // textbox hit - focused, brought to front, handled
             } else {
                 int did_redraw = 0;
                 if(fb_is_available()){
