@@ -271,5 +271,11 @@ void kernel_main(uint32_t magic, uint32_t mbi_addr) {
     // Uncomment to test exception handling (should print EXCEPTION and halt):
     // volatile int a = 1; volatile int b = 0; volatile int c = a / b; (void)c;
 
-    for (;;) { __asm__ volatile ("hlt"); }
+    // Main loop - deferred window redraw runs outside IRQ (fixes freeze: previously window_update_drag did full 3MB redraw inside IRQ12 with cli, blocking timer/keyboard)
+    for (;;) {
+        if(window_needs_redraw()){
+            window_do_redraw();
+        }
+        __asm__ volatile ("hlt");
+    }
 }

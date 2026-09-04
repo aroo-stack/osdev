@@ -2,6 +2,7 @@
 #include "framebuffer.h"
 #include "graphics.h"
 #include "mouse.h"
+#include "pmm.h"
 #include <stdint.h>
 #include <stddef.h>
 
@@ -13,6 +14,17 @@ static void w_strcpy(char *dst, const char *src, int n){
 static struct window windows[MAX_WINDOWS];
 static int window_count = 0;
 static int z_order[MAX_WINDOWS]; // indices sorted back->front
+// drag state - must be zeroed at boot (BSS) and explicitly reset in window_manager_init
+static int dragging = 0;
+static int drag_win = -1;
+static int drag_off_x = 0, drag_off_y = 0;
+// instrumentation for Phase 11 double-buffer freeze investigation
+volatile int g_in_redraw = 0;
+static int g_redraw_count = 0;
+static int g_missed_during_redraw = 0;
+static inline uint64_t rdtsc(void){ uint32_t lo,hi; __asm__ volatile("rdtsc":"=a"(lo),"=d"(hi)); return ((uint64_t)hi<<32)|lo; }
+// deferred redraw flag for Phase 12 fix - heavy window redraw should not run inside IRQ
+static volatile int g_needs_redraw = 0;
 
 static inline void outb(uint16_t port, uint8_t v){ __asm__ volatile("outb %0,%1"::"a"(v),"Nd"(port));}
 static inline uint8_t inb(uint16_t port){ uint8_t r; __asm__ volatile("inb %1,%0":"=a"(r):"Nd"(port)); return r;}
@@ -31,6 +43,25 @@ static void s_put_dec(int n){
 // Forward for cursor interaction - mouse.c provides cursor save/restore
 extern void window_redraw_with_cursor(void);
 
+static void window_draw_button(struct window *w){
+    if(!w->has_button) return;
+    // Button absolute position = window x + button x, window y + button y
+    // Button y is relative to window origin (0,0 = window top-left), so absolute already includes title bar offset if button placed below it
+    // Conversion: ax = w->x + btn.x, ay = w->y + btn.y
+    int ax = w->x + w->btn.x;
+    int ay = w->y + w->btn.y;
+    uint32_t bg = w->btn.pressed ? 0x00999999 : 0x00CCCCCC; // pressed darker
+    uint32_t border = 0x00000000;
+    uint32_t fg = 0x00000000; // black text on light button
+    fb_draw_rect(ax, ay, w->btn.w, w->btn.h, bg);
+    gfx_draw_rect_outline(ax, ay, w->btn.w, w->btn.h, border);
+    // label centered
+    int len = 0; while(w->btn.label[len] && len < 32) len++;
+    int tx = ax + (w->btn.w - len*8)/2;
+    int ty = ay + (w->btn.h - 8)/2;
+    gfx_draw_string(tx, ty, w->btn.label, fg);
+}
+
 static void window_draw_single(int idx){
     struct window *w = &windows[idx];
     if(!w->visible) return;
@@ -43,6 +74,8 @@ static void window_draw_single(int idx){
     gfx_draw_rect_outline(w->x, w->y, w->w, TITLE_BAR_H, w->border_color);
     // title text - centered vertically in title bar (8px font, title bar 20px)
     gfx_draw_string(w->x+6, w->y+6, w->title, 0x00FFFFFF);
+    // button if any
+    window_draw_button(w);
 }
 
 void window_manager_init(void){
@@ -50,6 +83,9 @@ void window_manager_init(void){
         s_puts("WM: no framebuffer, skip windows\n");
         return;
     }
+    // Defense: explicitly reset BSS-dependent drag/button state even though boot.s now zeroes BSS
+    // Without BSS zeroing, these would be garbage and first window_bring_to_front could read stale z_order or dragging flag
+    dragging = 0; drag_win = -1; drag_off_x = 0; drag_off_y = 0;
     // Create 3 overlapping windows - positions chosen to show overlap
     // Window 0 - back
     windows[0].x = 100; windows[0].y = 100; windows[0].w = 400; windows[0].h = 300;
@@ -59,6 +95,11 @@ void window_manager_init(void){
     windows[0].border_color = 0x00000000;
     windows[0].visible = 1;
     windows[0].z = 0;
+    windows[0].has_button = 1;
+    windows[0].btn.x = 20; windows[0].btn.y = 40; windows[0].btn.w = 120; windows[0].btn.h = 30;
+    w_strcpy(windows[0].btn.label, "Click Me", 32);
+    windows[0].btn.pressed = 0;
+    windows[0].btn.clicks = 0;
 
     windows[1].x = 250; windows[1].y = 180; windows[1].w = 400; windows[1].h = 300;
     w_strcpy(windows[1].title, "Window 2", 32);
@@ -67,6 +108,7 @@ void window_manager_init(void){
     windows[1].border_color = 0x00000000;
     windows[1].visible = 1;
     windows[1].z = 1;
+    windows[1].has_button = 0;
 
     windows[2].x = 400; windows[2].y = 250; windows[2].w = 350; windows[2].h = 250;
     w_strcpy(windows[2].title, "Window 3", 32);
@@ -75,18 +117,20 @@ void window_manager_init(void){
     windows[2].border_color = 0x00000000;
     windows[2].visible = 1;
     windows[2].z = 2;
+    windows[2].has_button = 0;
 
     window_count = 3;
     // z_order 0..2 back->front corresponds to windows index order initially
     for(int i=0;i<window_count;i++) z_order[i]=i;
 
-    s_puts("WM: created 3 windows\n");
+    s_puts("WM: created 3 windows (Window 1 has button)\n");
     window_manager_draw_all();
+    if(fb_is_double_buffered()) fb_swap(); // show windows without cursor yet, mouse will add cursor and swap again
 }
 
 void window_manager_draw_all(void){
     if(!fb_is_available()) return;
-    // Full screen redraw back-to-front
+    // Full screen redraw back-to-front - with double buffering, this draws to back buffer
     // Desktop background
     fb_fill(0x00112244);
 
@@ -97,13 +141,12 @@ void window_manager_draw_all(void){
         window_draw_single(idx);
     }
 
-    // After full redraw, cursor's saved background is invalid (screen changed)
-    // Caller should re-save cursor. We expose via mouse.c's cursor invalidation.
-    // Instead, we just invalidate via extern call if needed, or let mouse handler re-save on next move.
-    // For now, we don't draw cursor here - mouse.c will draw it after this call
     s_puts("WM: drew windows back->front z=[");
     for(int i=0;i<window_count;i++){ s_put_dec(z_order[i]); if(i<window_count-1) s_putc(','); }
     s_puts("]\n");
+    // Double buffering: drawing is to back buffer, visible front only updated via fb_swap()
+    // Caller should swap after drawing windows + cursor to show complete frame in one burst
+    // (prevents seeing intermediate blank/partial states that cause flicker)
 }
 
 int window_find_at(int x, int y){
@@ -121,32 +164,46 @@ int window_find_at(int x, int y){
 
 int window_bring_to_front(int idx){
     if(idx <0 || idx >= window_count) return 0;
-    // find current position in z_order
     int pos = -1;
     for(int i=0;i<window_count;i++) if(z_order[i]==idx) pos=i;
     if(pos==-1) return 0;
     if(pos == window_count-1){
         s_puts("WM: window "); s_put_dec(idx+1); s_puts(" already front\n");
-        return 0; // already front, no redraw
+        return 0;
     }
-    // Redraw strategy: full screen redraw on z-order change
-    // Cursor save/restore assumes static background, but windows reordering changes background.
-    // So restore old cursor, invalidate, then full redraw, then draw cursor at new position.
-    mouse_cursor_restore();
-    mouse_cursor_invalidate();
-    // move to front: shift elements between pos+1..end down one, put idx at end
     for(int i=pos;i<window_count-1;i++) z_order[i]=z_order[i+1];
     z_order[window_count-1]=idx;
-    // update z values for debug
     for(int i=0;i<window_count;i++) windows[z_order[i]].z = i;
     s_puts("WM: bring window "); s_put_dec(idx+1); s_puts(" to front, new z=[");
     for(int i=0;i<window_count;i++){ s_put_dec(z_order[i]); if(i<window_count-1) s_putc(','); }
     s_puts("]\n");
-    window_manager_draw_all();
-    // After full redraw, draw cursor at current mouse position with fresh save
-    mouse_cursor_draw_current();
+    g_needs_redraw = 1;
     return 1;
 }
+
+void window_set_needs_redraw(void){ g_needs_redraw = 1; }
+int window_needs_redraw(void){ return g_needs_redraw; }
+void window_do_redraw(void){
+    if(!g_needs_redraw) return;
+    g_needs_redraw = 0;
+    g_in_redraw = 1;
+    uint64_t t0 = rdtsc();
+    g_redraw_count++;
+    mouse_cursor_restore();
+    mouse_cursor_invalidate();
+    window_manager_draw_all();
+    mouse_cursor_draw_current();
+    if(fb_is_double_buffered()) fb_swap();
+    uint64_t t1 = rdtsc();
+    if((g_redraw_count % 10)==0){
+        s_puts("WM_REDRAW #"); s_put_dec(g_redraw_count);
+        s_puts(" cycles "); s_put_dec((uint32_t)(t1-t0));
+        s_puts(" PMM free "); s_put_dec(pmm_free_frames());
+        s_puts("\n");
+    }
+    g_in_redraw = 0;
+}
+
 
 int window_handle_click(int x, int y){
     int idx = window_find_at(x,y);
@@ -165,11 +222,6 @@ void window_get_info(int idx, int *x, int *y, int *w, int *h){
     if(w) *w=windows[idx].w;
     if(h) *h=windows[idx].h;
 }
-
-// --- Phase 11: dragging ---
-static int dragging = 0;
-static int drag_win = -1;
-static int drag_off_x = 0, drag_off_y = 0;
 
 int window_is_in_title_bar(int idx, int x, int y){
     if(idx<0||idx>=window_count) return 0;
@@ -201,11 +253,6 @@ void window_update_drag(int x, int y){
     struct window *w = &windows[drag_win];
     int new_x = x - drag_off_x;
     int new_y = y - drag_off_y;
-
-    // Bounds: allow partially off-screen but keep title bar visible so it can be dragged back
-    // Chosen: keep at least 60px of width visible and title bar 20px visible
-    // So x in [-w+60, width-60], y in [0, height - TITLE_BAR_H]
-    // Alternative fully on-screen would be 0..width-w, 0..height-h - we chose partially for usability
     int min_x = -w->w + 60;
     int max_x = (int)fb_get_width() - 60;
     int min_y = 0;
@@ -214,28 +261,78 @@ void window_update_drag(int x, int y){
     if(new_x > max_x) new_x = max_x;
     if(new_y < min_y) new_y = min_y;
     if(new_y > max_y) new_y = max_y;
-
-    if(new_x == w->x && new_y == w->y) return; // no move
-
-    // Redraw strategy for dragging: full screen redraw each move
-    // Why full redraw vs incremental (only erase old window rect and draw new)?
-    // Full redraw is simplest and guarantees correct z-order overlap for all windows.
-    // Incremental would need to handle clipping where dragged window overlaps others, and where
-    // other windows become exposed when dragged window moves away - complex to get right without artifacts.
-    // With only 3 windows at 1024x768, full redraw is ~3MB fill + 3*~120K windows = ~3.4M pixels per move.
-    // At 60-100Hz mouse moves, that's ~200-340M pixels/sec, well within QEMU's ~1GB/sec, no flicker on modern host.
-    // So we choose full redraw each drag move for correctness over micro-optimization.
-    mouse_cursor_restore();
-    mouse_cursor_invalidate();
+    if(new_x == w->x && new_y == w->y) return;
     w->x = new_x;
     w->y = new_y;
-    window_manager_draw_all();
-    mouse_cursor_draw_current();
+    g_needs_redraw = 1;
 }
+
 
 void window_end_drag(void){
     if(!dragging) return;
     s_puts("WM: drag end Window "); s_put_dec(drag_win+1); s_puts("\n");
     dragging = 0;
     drag_win = -1;
+}
+
+// --- Phase 12: button ---
+static int button_hit_test(int win_idx, int x, int y){
+    if(win_idx <0 || win_idx >= window_count) return 0;
+    struct window *w = &windows[win_idx];
+    if(!w->has_button) return 0;
+    int ax = w->x + w->btn.x;
+    int ay = w->y + w->btn.y;
+    return (x >= ax && x < ax + w->btn.w && y >= ay && y < ay + w->btn.h);
+}
+
+int window_handle_button_down(int x, int y){
+    int idx = window_find_at(x,y);
+    if(idx==-1) return 0;
+    if(!button_hit_test(idx,x,y)) return 0;
+    struct window *w = &windows[idx];
+    // Bring window to front if not already - defer redraw
+    int pos=-1;
+    for(int i=0;i<window_count;i++) if(z_order[i]==idx) pos=i;
+    if(pos != window_count-1){
+        for(int i=pos;i<window_count-1;i++) z_order[i]=z_order[i+1];
+        z_order[window_count-1]=idx;
+        for(int i=0;i<window_count;i++) windows[z_order[i]].z = i;
+        s_puts("WM: bring window "); s_put_dec(idx+1); s_puts(" to front (button) new z=[");
+        for(int i=0;i<window_count;i++){ s_put_dec(z_order[i]); if(i<window_count-1) s_putc(','); }
+        s_puts("]\n");
+    }
+    w->btn.pressed = 1;
+    g_needs_redraw = 1;
+    s_puts("BTN: down Window "); s_put_dec(idx+1); s_puts(" pressed\n");
+    return 1;
+}
+
+
+int window_handle_button_up(int x, int y){
+    int pressed_idx = -1;
+    for(int i=0;i<window_count;i++) if(windows[i].has_button && windows[i].btn.pressed) pressed_idx = i;
+    if(pressed_idx==-1) return 0;
+    struct window *w = &windows[pressed_idx];
+    int ax = w->x + w->btn.x;
+    int ay = w->y + w->btn.y;
+    int inside = (x >= ax && x < ax + w->btn.w && y >= ay && y < ay + w->btn.h);
+    w->btn.pressed = 0;
+    if(inside){
+        w->btn.clicks++;
+        char buf[32];
+        const char *prefix = "Clicked: ";
+        int p=0;
+        for(int i=0; prefix[i] && p<31; i++) buf[p++]=prefix[i];
+        char num[12]; int n=w->btn.clicks; int len=0;
+        if(n==0) num[len++]='0';
+        else { char tmp[12]; int t=0; while(n){ tmp[t++]='0'+n%10; n/=10; } while(t--) num[len++]=tmp[t]; }
+        for(int i=0;i<len && p<31; i++) buf[p++]=num[i];
+        buf[p]=0;
+        w_strcpy(w->btn.label, buf, 32);
+        s_puts("BTN: click Window "); s_put_dec(pressed_idx+1); s_puts(" count "); s_put_dec(w->btn.clicks); s_puts(" label "); s_puts(buf); s_puts("\n");
+    } else {
+        s_puts("BTN: release outside Window "); s_put_dec(pressed_idx+1); s_puts("\n");
+    }
+    g_needs_redraw = 1;
+    return 1;
 }

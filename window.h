@@ -5,6 +5,13 @@
 #define MAX_WINDOWS 3
 #define TITLE_BAR_H 20
 
+struct button {
+    int x, y, w, h; // relative to parent window origin (0,0 = window top-left)
+    char label[32];
+    int pressed;
+    int clicks;
+};
+
 struct window {
     int x, y, w, h;
     char title[32];
@@ -13,6 +20,8 @@ struct window {
     uint32_t border_color;
     int visible;
     int z; // 0 = back, higher = front
+    struct button btn;
+    int has_button;
 };
 
 void window_manager_init(void);
@@ -23,9 +32,16 @@ int window_handle_click(int x, int y); // returns 1 if handled (brought to front
 void window_get_info(int idx, int *x, int *y, int *w, int *h);
 // drag handling - Phase 11
 int window_start_drag(int x, int y); // check title bar, start drag if hit, returns 1 if started
-void window_update_drag(int x, int y); // update dragged window pos to x - offset, clamped, redraw
+void window_update_drag(int x, int y); // update dragged window pos to x - offset, clamped, redraw (now deferred)
 void window_end_drag(void);
 int window_is_dragging(void);
 int window_is_in_title_bar(int idx, int x, int y);
+// deferred redraw - Phase 11 fix: heavy redraw should run outside IRQ
+void window_set_needs_redraw(void);
+int window_needs_redraw(void);
+void window_do_redraw(void);
+// button - Phase 12
+int window_handle_button_down(int x, int y); // returns 1 if hit button
+int window_handle_button_up(int x, int y); // returns 1 if click completed (incremented)
 
 #endif

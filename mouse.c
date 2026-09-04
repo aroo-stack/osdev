@@ -3,6 +3,10 @@
 #include "window.h"
 #include <stdint.h>
 #include <stddef.h>
+extern volatile int g_in_redraw;
+static int g_missed_during_redraw = 0;
+static uint64_t g_last_tsc = 0;
+static inline uint64_t rdtsc_m(void){ uint32_t lo,hi; __asm__ volatile("rdtsc":"=a"(lo),"=d"(hi)); return ((uint64_t)hi<<32)|lo; }
 
 // 8042 ports - verified OSDev 8042 PS/2 Controller
 #define PORT_KBD_DATA 0x60
@@ -161,6 +165,24 @@ void mouse_handle_byte(uint8_t data){
         if(new_x > max_x) new_x = max_x;
         if(new_y > max_y) new_y = max_y;
 
+        // instrumentation for Phase 11 double-buffer freeze: check if IRQ arrived while previous redraw still in progress
+        if(g_in_redraw){
+            g_missed_during_redraw++;
+            if((g_missed_during_redraw % 10)==0){
+                s_puts("MOUSE: IRQ12 during redraw! missed="); s_put_dec(g_missed_during_redraw); s_puts("\n");
+            }
+        }
+        uint64_t cur_tsc = rdtsc_m();
+        if(g_last_tsc){
+            uint64_t delta = cur_tsc - g_last_tsc;
+            // log every 20th IRQ interval to see rate vs redraw time
+            static int irq_cnt=0;
+            if((++irq_cnt % 20)==0){
+                s_puts("MOUSE: IRQ interval cycles "); s_put_dec((uint32_t)delta); s_puts("\n");
+            }
+        }
+        g_last_tsc = cur_tsc;
+
         // serial debug - always, even before visual
         s_puts("MOUSE: dx=");
         s_put_dec(dx);
@@ -176,7 +198,7 @@ void mouse_handle_byte(uint8_t data){
         int left_released = !(buttons & 0x01) && (prev_buttons & 0x01);
         int moved = (new_x != mouse_x || new_y != mouse_y);
 
-        // Phase 11: dragging - handled before click-to-focus
+        // Phase 11/12: dragging, button, click handling - order matters: drag title bar -> button -> body
         if(window_is_dragging()){
             if(left_released){
                 __asm__ volatile("cli");
@@ -185,6 +207,7 @@ void mouse_handle_byte(uint8_t data){
                     cursor_restore();
                     mouse_x = new_x; mouse_y = new_y;
                     cursor_draw(mouse_x, mouse_y);
+                    if(fb_is_double_buffered()) fb_swap();
                 } else {
                     mouse_x = new_x; mouse_y = new_y;
                 }
@@ -205,6 +228,9 @@ void mouse_handle_byte(uint8_t data){
             if(hit != -1) is_title = window_is_in_title_bar(hit, new_x, new_y);
             if(is_title){
                 window_start_drag(new_x, new_y);
+            } else if(window_handle_button_down(new_x, new_y)){
+                // button hit - handled (bring to front + pressed visual)
+                // window_handle_button_down already did full redraw with cursor
             } else {
                 int did_redraw = 0;
                 if(fb_is_available()){
@@ -213,7 +239,26 @@ void mouse_handle_byte(uint8_t data){
                 if(!did_redraw && moved && fb_is_available()){
                     cursor_restore();
                     cursor_draw(new_x, new_y);
+                    if(fb_is_double_buffered()) fb_swap();
                 }
+            }
+            __asm__ volatile("sti");
+        } else if(left_released){
+            // button release - check if over same button that was pressed
+            __asm__ volatile("cli");
+            mouse_x = new_x; mouse_y = new_y;
+            // If a button was pressed, handle up (may increment count and redraw)
+            // window_handle_button_up will handle pressed state and full redraw if needed
+            // It returns 1 if it handled a button, otherwise we handle normal cursor move
+            int handled = 0;
+            if(fb_is_available()){
+                handled = window_handle_button_up(new_x, new_y);
+            }
+            if(!handled && moved && fb_is_available()){
+                cursor_restore();
+                cursor_draw(mouse_x, mouse_y);
+            } else if(!handled){
+                // no button, just update pos (already done)
             }
             __asm__ volatile("sti");
         } else if(moved && fb_is_available()){
@@ -222,6 +267,7 @@ void mouse_handle_byte(uint8_t data){
             mouse_x = new_x;
             mouse_y = new_y;
             cursor_draw(mouse_x, mouse_y);
+            if(fb_is_double_buffered()) fb_swap();
             __asm__ volatile("sti");
         } else {
             mouse_x = new_x;
@@ -233,12 +279,21 @@ void mouse_handle_byte(uint8_t data){
 
 void mouse_init(void){
     s_puts("MOUSE: init via 8042...\n");
+    // Defense: explicitly reset BSS-dependent state even if bootloader did not zero BSS
+    // Without this, first packet's mouse_cycle could be garbage -> desync and first move glitch,
+    // and saved_valid garbage -> first cursor_restore reads garbage pixels -> flicker
+    mouse_cycle = 0;
+    saved_valid = 0;
+    saved_x = -1; saved_y = -1;
     // Flush any pending data
     flush_output();
 
     // Step 1: Enable AUX port - 0xA8 - verified OSDev 8042
     wait_input();
     outb(PORT_KBD_CMD, 0xA8);
+    // Small delay and flush any spurious byte that 0xA8 may generate on some QEMU configs (observed 0x41 with double buffer timing)
+    for(int i=0;i<10000;i++) __asm__ volatile("nop");
+    flush_output();
     s_puts("MOUSE: sent 0xA8 enable AUX\n");
 
     // Step 2: Enable IRQ12 in command byte
@@ -312,6 +367,7 @@ void mouse_init(void){
         mouse_x = fb_get_width()/2;
         mouse_y = fb_get_height()/2;
         cursor_draw(mouse_x, mouse_y);
+        if(fb_is_double_buffered()) fb_swap();
         s_puts("MOUSE: cursor drawn at center\n");
     }
     mouse_enabled = 1;

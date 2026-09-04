@@ -4,13 +4,17 @@
 #include <stdint.h>
 #include <stddef.h>
 
-static uint32_t *fb_addr = 0;
+static uint32_t *fb_front = 0; // real visible framebuffer (physical identity)
+static uint32_t *fb_back = 0;  // off-screen back buffer
+static uint32_t *fb_target = 0; // cached draw target for per-pixel fast path (no branch per pixel)
 static uint32_t fb_pitch = 0;
 static uint32_t fb_width = 0;
 static uint32_t fb_height = 0;
 static uint8_t fb_bpp = 0;
 static uint8_t fb_type = 0;
 static int fb_available = 0;
+static int double_buffered = 0;
+static uint32_t fb_size_bytes = 0;
 
 static inline void outb(uint16_t port, uint8_t v){ __asm__ volatile("outb %0,%1"::"a"(v),"Nd"(port));}
 static inline uint8_t inb(uint16_t port){ uint8_t r; __asm__ volatile("inb %1,%0":"=a"(r):"Nd"(port)); return r;}
@@ -21,8 +25,15 @@ static void s_put_hex32(uint32_t n){ s_puts("0x"); for(int i=28;i>=0;i-=4){ uint
 static void s_put_dec(uint32_t n){ char b[11]; int i=0; if(n==0){s_putc('0');return;} while(n){b[i++]='0'+n%10; n/=10;} while(i--) s_putc(b[i]); }
 
 int fb_is_available(void){ return fb_available; }
+int fb_is_double_buffered(void){ return double_buffered; }
 uint32_t fb_get_width(void){ return fb_width; }
 uint32_t fb_get_height(void){ return fb_height; }
+
+// Internal helper: cached draw target - set once when double buffering enabled/disabled
+// This avoids per-pixel function call + branch (was fb_draw_target() per pixel in put_pixel loops)
+static inline uint32_t* fb_draw_target(void){
+    return fb_target ? fb_target : fb_front;
+}
 
 int fb_init(struct multiboot_info *mbi){
     if(!mbi){ s_puts("FB: no mbi\n"); return 0; }
@@ -51,7 +62,6 @@ int fb_init(struct multiboot_info *mbi){
     }
     if(bpp != 32){
         s_puts("FB: bpp !=32, got "); s_put_dec(bpp); s_puts(" - trying anyway, may be fallback\n");
-        // still try if GRUB gave different mode
     }
     if(width==0 || height==0){
         s_puts("FB: zero dimensions, fallback\n");
@@ -60,34 +70,73 @@ int fb_init(struct multiboot_info *mbi){
 
     // Map framebuffer physical pages into virtual same (identity)
     uint32_t fb_size = pitch * height;
-    // align size to 4K
     uint32_t pages = (fb_size + 0xFFF) >> 12;
     s_puts("FB: mapping "); s_put_dec(pages); s_puts(" pages ("); s_put_dec(fb_size/1024); s_puts(" KB) at "); s_put_hex32(addr); s_puts("\n");
     for(uint32_t i=0;i<pages;i++){
         uint32_t v = addr + i*0x1000;
         uint32_t p = v; // identity
         paging_map(v, p, 0x03);
-        // touch to fault early if mapping failed - volatile read
         volatile uint32_t *probe = (volatile uint32_t*)v;
         (void)*probe;
     }
-    fb_addr = (uint32_t*)addr;
+    fb_front = (uint32_t*)addr;
     fb_pitch = pitch;
     fb_width = width;
     fb_height = height;
     fb_bpp = bpp;
     fb_type = type;
     fb_available = 1;
+    fb_size_bytes = fb_size;
+    fb_target = fb_front; // draw to front until double buffering enabled
 
     s_puts("FB: mapped and accessible\n");
+
+    // --- Double buffering: allocate back buffer ---
+    // Why via PMM not heap: heap is only 1MB (Phase 6) but back buffer needs ~3MB (1024*768*4=3,145,728)
+    // PMM has ~127MB free (32616 frames), so we have space via PMM, not heap.
+    // We check heap size vs needed and report.
+    uint32_t need = fb_size;
+    s_puts("FB: double buffer check heap 1MB vs need "); s_put_dec(need/1024); s_puts(" KB -> ");
+    if(need > 1024*1024){
+        s_puts("heap too small (1MB), using PMM dedicated region\n");
+    } else {
+        s_puts("heap would be enough, but still using PMM for dedicated\n");
+    }
+    s_puts("FB: PMM free before back buffer: "); s_put_dec(pmm_free_frames()); s_puts(" frames\n");
+
+    // Choose virtual address for back buffer beyond heap and framebuffer
+    // Heap is 0x00400000-0x00500000 (1MB), framebuffer is 0xFD000000, so 0x00A00000 (10MB) is free virtual
+    // This virtual range is currently unmapped (PD 2), so paging_map will allocate tables as needed
+    uint32_t back_vaddr = 0x00A00000;
+    uint32_t back_pages = (need + 0xFFF) >> 12;
+    s_puts("FB: allocating back buffer "); s_put_dec(back_pages); s_puts(" pages at virtual "); s_put_hex32(back_vaddr); s_puts("\n");
+    for(uint32_t i=0;i<back_pages;i++){
+        uint32_t p = pmm_alloc_frame();
+        if(!p){
+            s_puts("FB: out of frames for back buffer!\n");
+            fb_back = 0;
+            double_buffered = 0;
+            return 1; // still have front buffer, just no double buffering
+        }
+        uint32_t v = back_vaddr + i*0x1000;
+        paging_map(v, p, 0x03);
+        // zero the page via virtual
+        volatile uint32_t *ptr = (volatile uint32_t*)v;
+        for(int j=0;j<1024;j++) ptr[j]=0;
+    }
+    fb_back = (uint32_t*)back_vaddr;
+    double_buffered = 1;
+    fb_target = fb_back; // cache: all future draws go to back, no per-pixel branch
+    s_puts("FB: double buffer allocated at "); s_put_hex32(back_vaddr); s_puts(" PMM free after: "); s_put_dec(pmm_free_frames()); s_puts("\n");
+    s_puts("FB: double buffering enabled (draw to back, swap to front)\n");
     return 1;
 }
 
 void fb_put_pixel(uint32_t x, uint32_t y, uint32_t color){
     if(!fb_available) return;
     if(x >= fb_width || y >= fb_height) return;
-    // 32bpp: 4 bytes per pixel, pitch is bytes per row
-    uint8_t *row = (uint8_t*)fb_addr + y * fb_pitch;
+    uint32_t *target = fb_target ? fb_target : fb_front;
+    uint8_t *row = (uint8_t*)target + y * fb_pitch;
     uint32_t *pixel = (uint32_t*)(row + x*4);
     *pixel = color;
 }
@@ -95,15 +144,17 @@ void fb_put_pixel(uint32_t x, uint32_t y, uint32_t color){
 uint32_t fb_get_pixel(uint32_t x, uint32_t y){
     if(!fb_available) return 0;
     if(x >= fb_width || y >= fb_height) return 0;
-    uint8_t *row = (uint8_t*)fb_addr + y * fb_pitch;
+    uint32_t *target = fb_target ? fb_target : fb_front;
+    uint8_t *row = (uint8_t*)target + y * fb_pitch;
     uint32_t *pixel = (uint32_t*)(row + x*4);
     return *pixel;
 }
 
 void fb_fill(uint32_t color){
     if(!fb_available) return;
+    uint32_t *target = fb_target ? fb_target : fb_front;
     for(uint32_t y=0;y<fb_height;y++){
-        uint8_t *row = (uint8_t*)fb_addr + y*fb_pitch;
+        uint8_t *row = (uint8_t*)target + y*fb_pitch;
         uint32_t *pixels = (uint32_t*)row;
         for(uint32_t x=0;x<fb_width;x++) pixels[x]=color;
     }
@@ -111,9 +162,42 @@ void fb_fill(uint32_t color){
 
 void fb_draw_rect(uint32_t x, uint32_t y, uint32_t w, uint32_t h, uint32_t color){
     if(!fb_available) return;
+    uint32_t *target = fb_target ? fb_target : fb_front;
+    // Clip to screen
+    if(x >= fb_width || y >= fb_height) return;
+    if(x + w > fb_width) w = fb_width - x;
+    if(y + h > fb_height) h = fb_height - y;
     for(uint32_t dy=0; dy<h; dy++){
-        for(uint32_t dx=0; dx<w; dx++){
-            fb_put_pixel(x+dx, y+dy, color);
-        }
+        uint8_t *row = (uint8_t*)target + (y+dy) * fb_pitch;
+        uint32_t *pixels = (uint32_t*)(row + x*4);
+        for(uint32_t dx=0; dx<w; dx++) pixels[dx]=color;
     }
+}
+
+static uint32_t fb_swap_count = 0;
+
+void fb_swap(void){
+    if(!fb_available || !double_buffered || !fb_back || !fb_front) return;
+    fb_swap_count++;
+    // Diagnostic for leak check: uncomment to log every swap
+    // if(fb_swap_count < 20 || (fb_swap_count % 10)==0){
+    //     s_puts("FB_SWAP #"); s_put_dec(fb_swap_count);
+    //     s_puts(" PMM free "); s_put_dec(pmm_free_frames());
+    //     s_puts(" frames\n");
+    // }
+    // Fast copy back -> front. This is the ONLY write to visible front buffer - eliminates flicker
+    // because the display never sees intermediate fb_fill / partial windows.
+    // Do NOT unconditionally cli/sti here - caller already holds cli for window/mouse critical sections.
+    // Doing cli here when caller already did cli would cause nested cli/sti mismatch:
+    // inner sti would re-enable interrupts prematurely while outer still expects disabled, causing re-entrancy
+    // and stack overflow after many drag moves (~3 sec). So just do the copy with current interrupt state.
+    uint32_t *src = fb_back;
+    uint32_t *dst = fb_front;
+    uint32_t dwords = fb_size_bytes / 4;
+    __asm__ volatile(
+        "cld; rep movsl"
+        : "+S"(src), "+D"(dst), "+c"(dwords)
+        :
+        : "memory"
+    );
 }
