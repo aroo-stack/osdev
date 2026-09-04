@@ -36,10 +36,11 @@ void task_init(void){
 
 int task_create(void (*entry)(void), const char *name){
     if(num_tasks >= MAX_TASKS) return -1;
-    // Avoid overlap with back buffer at 0x00A00000 (10MB, 3MB) and heap at 0x00400000
-    // Use 0x00E00000 (14MB) for task stacks, which is in PD 3 (12MB-16MB) but not yet used for back buffer (which uses PD 2 and part of PD 3)
-    // Back buffer uses 0x00A00000-0x00D00000 (PD 2 and part of PD 3 up to 0x00D00000), so 0x00E00000 is safely beyond
-    uint32_t vbase = 0x00E00000 + num_tasks * TASK_STACK_SIZE;
+    // Avoid overlap with back buffer at 0x01000000 (16MB, 8.3M) and heap at 0x00400000
+    // Use 0x03000000 (48MB) for task stacks, which is well beyond back buffer (0x01000000-0x018E9000) and wallpaper cache at 0x02000000
+    // Previously 0x00E00000 overlapped for 1920x1080 8M buffers, so moved to 0x03000000
+    uint32_t vbase = 0x03000000 + num_tasks * TASK_STACK_SIZE;
+    paging_ensure_range(vbase, TASK_STACK_SIZE);
     for(int i=0;i<TASK_STACK_SIZE;i+=4096){
         uint32_t v = vbase + i;
         uint32_t p = pmm_alloc_frame();

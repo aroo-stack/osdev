@@ -64,7 +64,7 @@ os.iso: kernel.bin
 	echo 'insmod all_video' >> isodir/boot/grub/grub.cfg
 	echo 'insmod vbe' >> isodir/boot/grub/grub.cfg
 	echo 'insmod gfxterm' >> isodir/boot/grub/grub.cfg
-	echo 'set gfxmode=1024x768x32' >> isodir/boot/grub/grub.cfg
+	echo 'set gfxmode=1920x1080x32' >> isodir/boot/grub/grub.cfg
 	echo 'set gfxpayload=keep' >> isodir/boot/grub/grub.cfg
 	echo 'terminal_output gfxterm' >> isodir/boot/grub/grub.cfg
 	echo 'menuentry "MyOS" {' >> isodir/boot/grub/grub.cfg

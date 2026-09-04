@@ -167,6 +167,10 @@ void isr_handler(struct regs *r) {
     serial_put_hex(r->cs);
     serial_puts(" eflags=");
     serial_put_hex(r->eflags);
+    if(r->int_no==14){
+        uint32_t cr2; __asm__ volatile("mov %%cr2, %0":"=r"(cr2));
+        serial_puts(" cr2="); serial_put_hex(cr2);
+    }
     serial_puts("\n");
     serial_puts("System halted.\n");
     for (;;) { __asm__ volatile ("cli; hlt"); }

@@ -19,5 +19,6 @@ uint32_t* fb_get_front_buffer(void);
 uint32_t fb_get_front_pixel(uint32_t x, uint32_t y);
 uint32_t fb_get_size_bytes(void);
 void fb_blit_from(uint32_t *src); // fast copy src (size fb_size_bytes) -> back buffer
+uint64_t fb_get_last_swap_cycles(void);
 
 #endif

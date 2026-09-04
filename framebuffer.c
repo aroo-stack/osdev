@@ -18,6 +18,7 @@ static uint32_t fb_size_bytes = 0;
 
 static inline void outb(uint16_t port, uint8_t v){ __asm__ volatile("outb %0,%1"::"a"(v),"Nd"(port));}
 static inline uint8_t inb(uint16_t port){ uint8_t r; __asm__ volatile("inb %1,%0":"=a"(r):"Nd"(port)); return r;}
+static inline uint64_t rdtsc(void){ uint32_t lo,hi; __asm__ volatile("rdtsc":"=a"(lo),"=d"(hi)); return ((uint64_t)hi<<32)|lo; }
 static int tx_empty(){ return inb(0x3F8+5)&0x20; }
 static void s_putc(char c){ while(!tx_empty()); outb(0x3F8,c); }
 static void s_puts(const char*s){ for(size_t i=0;s[i];i++) s_putc(s[i]); }
@@ -92,7 +93,7 @@ int fb_init(struct multiboot_info *mbi){
     s_puts("FB: mapped and accessible\n");
 
     // --- Double buffering: allocate back buffer ---
-    // Why via PMM not heap: heap is only 1MB (Phase 6) but back buffer needs ~3MB (1024*768*4=3,145,728)
+    // Why via PMM not heap: heap is only 1MB (Phase 6) but back buffer needs ~8.3M at 1920x1080 (1920*1080*4=8,294,400) vs 3M at 1024x768
     // PMM has ~127MB free (32616 frames), so we have space via PMM, not heap.
     // We check heap size vs needed and report.
     uint32_t need = fb_size;
@@ -105,11 +106,14 @@ int fb_init(struct multiboot_info *mbi){
     s_puts("FB: PMM free before back buffer: "); s_put_dec(pmm_free_frames()); s_puts(" frames\n");
 
     // Choose virtual address for back buffer beyond heap and framebuffer
-    // Heap is 0x00400000-0x00500000 (1MB), framebuffer is 0xFD000000, so 0x00A00000 (10MB) is free virtual
-    // This virtual range is currently unmapped (PD 2), so paging_map will allocate tables as needed
-    uint32_t back_vaddr = 0x00A00000;
+    // Heap is 0x00400000-0x00500000 (1MB), framebuffer is 0xFD000000,
+    // For 1920x1080 need 8.3M (2025 pages) vs 1024x768 3M, so place at 0x00600000 (6MB) within PD 1 (4M-8M) already partially mapped for heap
+    // to keep TLB/cache friendly. Previously 0x01000000/0x02000000 at 16M/32M caused high-page table allocations and slow rep movsl (81M vs 7M expected).
+    // 0x00600000 (6M) uses same PD as heap (PD1) so no new high tables, and is low enough to stay cacheable.
+    uint32_t back_vaddr = 0x00600000;
     uint32_t back_pages = (need + 0xFFF) >> 12;
     s_puts("FB: allocating back buffer "); s_put_dec(back_pages); s_puts(" pages at virtual "); s_put_hex32(back_vaddr); s_puts("\n");
+    paging_ensure_range(back_vaddr, need);
     for(uint32_t i=0;i<back_pages;i++){
         uint32_t p = pmm_alloc_frame();
         if(!p){
@@ -175,6 +179,8 @@ void fb_draw_rect(uint32_t x, uint32_t y, uint32_t w, uint32_t h, uint32_t color
 }
 
 static uint32_t fb_swap_count = 0;
+static uint64_t last_swap_cycles = 0;
+uint64_t fb_get_last_swap_cycles(void){ return last_swap_cycles; }
 
 // Wait for start of vblank: NOT in retrace -> retrace starts
 // 0x3DA bit 3 = vertical retrace (1 = in retrace) - standard VGA status
@@ -230,6 +236,7 @@ void fb_swap(void){
     // Standard pattern: wait NOT in retrace, then wait for retrace START, then copy during blank.
     // Timeout prevents hang if QEMU std/VBE doesn't toggle 0x3DA bit 3.
     wait_for_vblank();
+    uint64_t t0 = rdtsc();
     uint32_t *src = fb_back;
     uint32_t *dst = fb_front;
     uint32_t dwords = fb_size_bytes / 4;
@@ -239,4 +246,6 @@ void fb_swap(void){
         :
         : "memory"
     );
+    uint64_t t1 = rdtsc();
+    last_swap_cycles = t1 - t0;
 }

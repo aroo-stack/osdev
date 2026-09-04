@@ -33,9 +33,9 @@ static inline uint64_t rdtsc(void){ uint32_t lo,hi; __asm__ volatile("rdtsc":"=a
 // deferred redraw flag for Phase 12 fix - heavy window redraw should not run inside IRQ
 volatile int g_needs_redraw = 0;
 
-// --- Bliss wallpaper cache (1x framebuffer, ~3MB) to avoid recomputing sky+hills+circles every frame ---
-// Trade: PMM has ~127MB free (32349 frames before back buffer, 31579 after), cache needs 768 frames = 3MB -> feasible
-// Virtual layout: heap 0x00400000-0x00500000 (1MB), fb_back 0x00A00000-0x00CFFFFF (3MB), wallpaper 0x00D00000-0x00FFFFFF (3MB) below 0xFD000000 fb_front
+// --- Bliss wallpaper cache (1x framebuffer, ~8.3MB at 1920x1080) to avoid recomputing sky+hills+circles every frame ---
+// Trade: PMM has ~127MB free (~32300 frames before), back buffer 2025 pages (~8.3MB at 1920*1080*4), cache also 2025 pages => ~16.6MB total + heap/task stacks ~ few MB => ~20MB well within 127MB
+// Virtual layout: heap 0x00400000-0x00500000 (1MB), fb_back 0x00600000-0x00DE9000 (~8.3MB), wallpaper 0x00F00000-0x016E9000 (~8.3MB), task stacks 0x03000000+ below 0xFD000000 fb_front (tried 0x01000000/0x02000000 at 16M/32M but high PD caused slow rep movsl)
 static uint32_t *wallpaper_cache = 0;
 static uint32_t wallpaper_cache_bytes = 0;
 static uint32_t wallpaper_cache_pages = 0;
@@ -43,6 +43,10 @@ static int wallpaper_cache_ready = 0;
 static uint64_t wallpaper_build_cycles = 0; // cycles to build once
 static uint64_t last_wallpaper_cycles = 0; // per-frame wallpaper cost (recompute or blit)
 static uint64_t last_windows_cycles = 0;
+static uint64_t last_sky_cycles = 0;
+static uint64_t last_hill_cycles = 0;
+static uint64_t last_cloud_cycles = 0;
+static int last_wallpaper_was_blit = 0;
 static void wallpaper_cache_build_once(void);
 
 static inline void outb(uint16_t port, uint8_t v){ __asm__ volatile("outb %0,%1"::"a"(v),"Nd"(port));}
@@ -474,8 +478,8 @@ static int wallpaper_cache_alloc(void){
     int w = fb_get_width(); int h = fb_get_height();
     uint32_t need = (uint32_t)w * (uint32_t)h * 4;
     wallpaper_cache_bytes = need;
-    wallpaper_cache_pages = (need + 0xFFF) >> 12; // 768 for 1024x768x32 (3MB)
-    uint32_t vaddr = 0x00D00000; // after fb_back 0x00A00000+3MB=0x00D00000, before 0xFD000000
+    wallpaper_cache_pages = (need + 0xFFF) >> 12; // e.g., 768 for 1024x768 (3MB) vs 2025 for 1920x1080 (8.3MB)
+    uint32_t vaddr = 0x00F00000; // after fb_back 0x00600000+8.3M=0x00DE9000, so 0x00F00000 (15M) safely after, still low for cache friendliness (was 0x02000000 at 32M, caused slow blit)
     s_puts("WALLPAPER: cache alloc "); s_put_dec(wallpaper_cache_pages); s_puts(" pages need "); s_put_dec(need/1024); s_puts(" KB at "); s_put_hex32(vaddr);
     s_puts(" PMM free before "); s_put_dec(pmm_free_frames()); s_puts("\n");
     for(uint32_t i=0;i<wallpaper_cache_pages;i++){
@@ -523,7 +527,7 @@ static void draw_bliss_wallpaper(void){
     int sky_h = h * 60 / 100; // upper 60% sky
     int hill_base = sky_h; // hills start at 60% from top
     // Sky gradient - brighter blue top (0x0087CEEB sky blue) to pale near horizon (0x00B0E0E6 powder blue)
-    // Chose vertical per-row lerp: 460 rows * 1024 cols = 471k writes, same as before, 460 lerps
+    // Chose vertical per-row lerp: sky_h rows * w cols (e.g., 648*1920=1.2M at 1080p, 460*1024=471k at 768p), sky_h lerps
     uint32_t sky_top = 0x0087CEEB;
     uint32_t sky_bot = 0x00B0E0E6;
     uint8_t top_r = (sky_top>>16)&0xFF, top_g=(sky_top>>8)&0xFF, top_b=sky_top&0xFF;
@@ -537,25 +541,27 @@ static void draw_bliss_wallpaper(void){
         fb_draw_rect(0, y, w, 1, col);
     }
     // Fill below horizon with sky bottom before hills - ensures no 35px black gap if hill_base+offset > sky_h
-    // Without this, gap 460..far_y-1 (up to 35px) remains untouched (black) when base=35
+    // Without this, gap sky_h..far_y-1 remains untouched (black) when base>0
     fb_draw_rect(0, sky_h, w, h - sky_h, 0x00B0E0E6); // sky_bot solid under hills
     // Hills will overwrite this sky_bot area from far_y/near_y down, leaving only visible hill silhouette
-    // Sun - filled pale yellow/white at upper right, radius 40 at 800,120
-    gfx_draw_filled_circle(800, 120, 40, 0x00FFFFE0); // light yellow
-    gfx_draw_filled_circle(800, 120, 35, 0x00FFFFFF); // white center for highlight
+    // Sun - filled pale yellow/white at upper right, dynamic for width (75% + 120y). At 1024x768 was 800,120; at 1920x1080 ~1696,120
+    int sun_x = w - 224; if(sun_x < 0) sun_x = w*3/4;
+    int sun_y = 120;
+    gfx_draw_filled_circle(sun_x, sun_y, 40, 0x00FFFFE0); // light yellow
+    gfx_draw_filled_circle(sun_x, sun_y, 35, 0x00FFFFFF); // white center for highlight
 
-    // Hills - two gentle layers for depth, low frequency for wide rolling (Bliss has 2-3 broad curves across 1024px, not sawtooth)
-    // Trace addresses: hill_base = sky_h = 460 (h=768*60/100), sky GRAD filled y=0..459 (460 rows), hills fill y=far_y..767
-    // Previously far_phase=(x*2)&0xFF period 128 (8 hills) and near_phase=(x*3)&0xFF period 85 (12 hills) => sawtooth many bumps;
-    // seam at x~170-260 was NOT a delta>1 discontinuity (max was 1-2) but visual choppiness + 35px base offset leaving black gap
-    // Now use period 600 far (1024/600≈1.71 hills) and 400 near (≈2.56 hills) with DIFFERENT freq so layers don't align, gentle
-    // Phase = x*256/period &0xFF, hill_y = sky_h + baseOff + amp*sin/128, baseOff small so hills touch horizon (y≈sky_h)
-    // Address trace: fb at 0xFD000000, back buffer 0x00A00000, per-column 1x(h-y) writes 1024*~300 avg = 300k pixels, no overlap gap
+    // Hills - two gentle layers for depth, low frequency for wide rolling (Bliss has 2-3 broad curves, not sawtooth)
+    // Trace addresses: hill_base = sky_h = h*60/100, sky GRAD filled y=0..sky_h-1, hills fill y=far_y..h-1
+    // Previously period 128 (8 hills) and 85 (12 hills) => sawtooth. Now period scaled with width to keep visual: 600/400 at 1024 => 1.71/2.56 hills
+    // At 1920, periods 1125/750 keep same 1.71/2.56 visual (1920/1125≈1.71). Phase = x*256/period &0xFF, hill_y = sky_h + baseOff + amp*sin/128
+    // Address trace: fb at 0xFD000000, back 0x00600000, cache 0x00F00000, per-column 1x(h-y) writes w*~h*0.4 avg pixels, no overlap gap
     uint32_t far_green = 0x0090C060; // lighter far
     uint32_t near_green = 0x0030A030; // darker near - Bliss meadow
+    int far_period = w * 600 / 1024; if(far_period < 1) far_period = 1;
+    int near_period = w * 400 / 1024; if(near_period < 1) near_period = 1;
     for(int x=0; x<w; x++){
-        int far_phase = (x * 256 / 600) & 0xFF; // period 600 - gentle 1.7x across width
-        int near_phase = (x * 256 / 400) & 0xFF; // period 400 - 2.56x, different from far
+        int far_phase = (x * 256 / far_period) & 0xFF; // scaled period keeps ~1.7 hills visual
+        int near_phase = (x * 256 / near_period) & 0xFF; // scaled period keeps ~2.5 hills visual
         int far_y = hill_base + 8 + (sin_lookup(far_phase) * 18 >> 7); // base 8, amp 18 => range 460±16, touches horizon
         int near_y = hill_base + 32 + (sin_lookup(near_phase) * 30 >> 7); // base 32, amp 30 => range 460+2..62, in front of far
         // Subtle second wave for organic rolling, different offset/amp per layer to avoid identical alignment
@@ -569,21 +575,19 @@ static void draw_bliss_wallpaper(void){
         fb_draw_rect(x, far_y, 1, h - far_y, far_green);
         fb_draw_rect(x, near_y, 1, h - near_y, near_green);
     }
-    // Clouds - 3 clusters of 3-4 overlapping white circles, cheap, in sky area (y < sky_h)
-    // Cluster 1 at 180,80
-    gfx_draw_filled_circle(180, 80, 28, 0x00FFFFFF);
-    gfx_draw_filled_circle(210, 70, 22, 0x00FFFFFF);
-    gfx_draw_filled_circle(240, 85, 18, 0x00FFFFFF);
-    gfx_draw_filled_circle(160, 90, 15, 0x00FFFFFF);
-    // Cluster 2 at 500,100
-    gfx_draw_filled_circle(500, 100, 30, 0x00FFFFFF);
-    gfx_draw_filled_circle(530, 85, 20, 0x00FFFFFF);
-    gfx_draw_filled_circle(470, 95, 18, 0x00FFFFFF);
-    gfx_draw_filled_circle(550, 105, 14, 0x00FFFFFF);
-    // Cluster 3 at 850,90
-    gfx_draw_filled_circle(850, 90, 26, 0x00FFFFFF);
-    gfx_draw_filled_circle(880, 75, 18, 0x00FFFFFF);
-    gfx_draw_filled_circle(820, 80, 16, 0x00FFFFFF);
+    // Clouds - 3 clusters of 3-4 overlapping white circles, cheap, in sky area (y < sky_h) - x scaled with width
+    // Original at 1024: cluster1 180,80 etc., cluster2 500,100, cluster3 850,90. At 1920 scaled ~1.875x keeps similar visual spread.
+    int cx1 = w * 180 / 1024; gfx_draw_filled_circle(cx1, 80, 28, 0x00FFFFFF);
+    gfx_draw_filled_circle(w * 210 / 1024, 70, 22, 0x00FFFFFF);
+    gfx_draw_filled_circle(w * 240 / 1024, 85, 18, 0x00FFFFFF);
+    gfx_draw_filled_circle(w * 160 / 1024, 90, 15, 0x00FFFFFF);
+    int cx2 = w * 500 / 1024; gfx_draw_filled_circle(cx2, 100, 30, 0x00FFFFFF);
+    gfx_draw_filled_circle(w * 530 / 1024, 85, 20, 0x00FFFFFF);
+    gfx_draw_filled_circle(w * 470 / 1024, 95, 18, 0x00FFFFFF);
+    gfx_draw_filled_circle(w * 550 / 1024, 105, 14, 0x00FFFFFF);
+    int cx3 = w * 850 / 1024; gfx_draw_filled_circle(cx3, 90, 26, 0x00FFFFFF);
+    gfx_draw_filled_circle(w * 880 / 1024, 75, 18, 0x00FFFFFF);
+    gfx_draw_filled_circle(w * 820 / 1024, 80, 16, 0x00FFFFFF);
 }
 
 static void wallpaper_cache_build_once(void){
