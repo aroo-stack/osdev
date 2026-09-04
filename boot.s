@@ -32,7 +32,19 @@ stack_top:
 section .text
 global _start
 extern kernel_main
+extern _bss_start
+extern _bss_end
 _start:
+    ; Zero .bss - GRUB loads SHT_NOBITS but does NOT guarantee zero on QEMU reset with leftover RAM
+    ; Without this, static buffers like mouse saved_pixels, window z_order, heap bitmap etc. contain garbage
+    ; and the first cursor_restore reads garbage -> flicker on first interaction
+    cld
+    mov edi, _bss_start
+    mov ecx, _bss_end
+    sub ecx, edi
+    shr ecx, 2          ; count dwords
+    xor eax, eax
+    rep stosd
     mov esp, stack_top
     push ebx
     push eax

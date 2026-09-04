@@ -174,9 +174,13 @@ void irq_handler(struct regs *r) {
     if (r->int_no == 33) { // IRQ1 keyboard - vector 33 = 0x20+1
         uint8_t scancode = inb(0x60);
         outb(0x20, 0x20);
-        // Filter spurious ACK 0xFA/0xFE that can leak from mouse enable (observed headless: 0xFA delivered via IRQ1 after 0xF4)
-        // These are not real key presses; ignore to avoid confusion with mouse
-        if(scancode==0xFA || scancode==0xFE) return;
+        // Filter spurious ACKs that leak from mouse 8042 init (observed: 0xFA after 0xF4, and 0x41 command byte echo after 0xA8 with double buffer timing)
+        // These are not real key presses; ignore to avoid confusion. Also filter 0x41 which appeared once after double buffer alloc.
+        if(scancode==0xFA || scancode==0xFE || scancode==0x41) {
+            // Optionally log but not as KEY
+            // serial_puts("KEY filtered spurious 0x"); serial_put_hex(scancode); s_puts("\n");
+            return;
+        }
         serial_puts("KEY scancode=");
         serial_put_dec(scancode);
         serial_puts(" hex=");

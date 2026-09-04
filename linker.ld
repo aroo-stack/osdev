@@ -24,8 +24,10 @@ SECTIONS
 
     .bss BLOCK(4K) : ALIGN(4K)
     {
+        _bss_start = .;
         *(COMMON)
         *(.bss)
+        _bss_end = .;
     }
 
     _kernel_end = .;
