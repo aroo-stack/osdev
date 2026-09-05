@@ -10,8 +10,8 @@
 #define PORT_KBD_CMD  0x64
 
 // Cursor state - 16x16 save buffer
-#define CURSOR_W 12
-#define CURSOR_H 12
+#define CURSOR_W 16
+#define CURSOR_H 16
 static int mouse_x = 512; // center
 static int mouse_y = 384;
 static int mouse_enabled = 0;
@@ -87,12 +87,13 @@ static void cursor_restore(void){
     saved_valid = 0;
 }
 
-// Small filled triangle cursor - right-pointing arrow, white with black border, 12x12
+// Small filled triangle cursor - right-pointing arrow, white with black border, 16x16
+// (save buffer was already 16x16, so no buffer change needed; hotspot stays top-left)
 static void draw_cursor_shape(int x, int y){
     for(int dy=0; dy<CURSOR_H; dy++){
         int w;
-        if(dy <= 5) w = dy+1; // top half expanding
-        else w = 12 - (dy-5); // bottom half contracting, max 6 at middle
+        if(dy <= 7) w = dy+1; // top half expanding
+        else w = 16 - (dy-7); // bottom half contracting, max 8 at middle
         if(w<1) w=1;
         if(w>CURSOR_W) w=CURSOR_W;
         for(int dx=0; dx<w; dx++){
@@ -101,8 +102,8 @@ static void draw_cursor_shape(int x, int y){
         fb_put_pixel(x+w, y+dy, 0x00000000);
         fb_put_pixel(x, y+dy, 0x00000000);
     }
-    fb_put_pixel(x+11, y+5, 0x00000000);
-    fb_put_pixel(x+10, y+5, 0x00000000);
+    fb_put_pixel(x+15, y+7, 0x00000000);
+    fb_put_pixel(x+14, y+7, 0x00000000);
 }
 
 static void cursor_draw(int x, int y){
