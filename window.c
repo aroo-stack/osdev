@@ -403,6 +403,64 @@ static void draw_clicker_icon(int gx, int gy){
     gfx_draw_circle(cx, by+16, 9, edge);
     gfx_draw_line(cx-4, by, cx+4, by, light);
 }
+// Task Manager icon: frosted-glass squircle tile with etched grid and a glowing
+// blue performance graph (sharp peaks, bright node dot at the peak - a nod to
+// the original blue dot). Solid primitives only; squircle corners and the border
+// are faked with narrowed rows since there is no alpha blending.
+static void draw_taskmgr_icon(int gx, int gy){
+    uint32_t border = 0x001B2A3A;  // dark tile border
+    uint32_t glass = 0x0035608A;   // steel-blue frosted glass
+    uint32_t glass_hi = 0x008FB8D8;// glassy top highlight
+    uint32_t etched = 0x002A4A6B;  // etched grid lines
+    uint32_t graph = 0x0038BDF8;   // vibrant performance line
+    uint32_t glow = 0x007DD3FC;    // node glow ring
+    uint32_t shadow = 0x00101C2A;  // drop shadow
+    int tx = gx + 4, ty = gy + 4;  // 24x24 tile centered in the 32x32 canvas
+    // drop shadow squircle (offset down-right)
+    fb_draw_rect(tx+1, ty+1, 26, 26, shadow);
+    // dark border squircle (one px larger all around the glass)
+    fb_draw_rect(tx-1+5, ty-1, 16, 1, border);
+    fb_draw_rect(tx-1+3, ty, 20, 1, border);
+    fb_draw_rect(tx-1+2, ty+1, 22, 1, border);
+    fb_draw_rect(tx-1+1, ty+2, 24, 1, border);
+    fb_draw_rect(tx-1, ty+3, 26, 18, border);
+    fb_draw_rect(tx-1+1, ty+21, 24, 1, border);
+    fb_draw_rect(tx-1+2, ty+22, 22, 1, border);
+    fb_draw_rect(tx-1+3, ty+23, 20, 1, border);
+    fb_draw_rect(tx-1+5, ty+24, 16, 1, border);
+    // glass squircle
+    fb_draw_rect(tx+4, ty, 16, 1, glass);
+    fb_draw_rect(tx+2, ty+1, 20, 1, glass);
+    fb_draw_rect(tx+1, ty+2, 22, 1, glass);
+    fb_draw_rect(tx, ty+3, 24, 18, glass);
+    fb_draw_rect(tx+1, ty+21, 22, 1, glass);
+    fb_draw_rect(tx+2, ty+22, 20, 1, glass);
+    fb_draw_rect(tx+4, ty+23, 16, 1, glass);
+    // glossy top highlight strip
+    fb_draw_rect(tx+3, ty+3, 18, 2, glass_hi);
+    // etched grid
+    fb_draw_rect(tx+9, ty+5, 1, 14, etched);
+    fb_draw_rect(tx+15, ty+5, 1, 14, etched);
+    fb_draw_rect(tx+4, ty+10, 16, 1, etched);
+    fb_draw_rect(tx+4, ty+15, 16, 1, etched);
+    // performance graph (2px thick polyline with sharp peaks)
+    gfx_draw_line(tx+3, ty+16, tx+6, ty+12, graph);
+    gfx_draw_line(tx+3, ty+17, tx+6, ty+13, graph);
+    gfx_draw_line(tx+6, ty+12, tx+9, ty+14, graph);
+    gfx_draw_line(tx+6, ty+13, tx+9, ty+15, graph);
+    gfx_draw_line(tx+9, ty+14, tx+12, ty+6, graph);
+    gfx_draw_line(tx+9, ty+15, tx+12, ty+7, graph);
+    gfx_draw_line(tx+12, ty+6, tx+15, ty+11, graph);
+    gfx_draw_line(tx+12, ty+7, tx+15, ty+12, graph);
+    gfx_draw_line(tx+15, ty+11, tx+18, ty+9, graph);
+    gfx_draw_line(tx+15, ty+12, tx+18, ty+10, graph);
+    gfx_draw_line(tx+18, ty+9, tx+20, ty+13, graph);
+    gfx_draw_line(tx+18, ty+10, tx+20, ty+14, graph);
+    // glowing node dot at the peak (the original blue dot, kept as tribute)
+    gfx_draw_filled_circle(tx+12, ty+6, 3, glow);
+    gfx_draw_filled_circle(tx+12, ty+6, 2, graph);
+    fb_draw_rect(tx+12, ty+6, 1, 1, 0x00FFFFFF);
+}
 void desktop_icons_draw(void){
     if(!fb_is_available()) return;
     for(int i=0;i<desktop_icon_count;i++){
@@ -410,7 +468,7 @@ void desktop_icons_draw(void){
         int ix = ic->x; int iy = ic->y;
         int gx = ix + (ICON_W - ICON_GLYPH)/2; int gy = iy + 4;
         if(i==0){ fb_draw_rect(gx, gy, ICON_GLYPH, ICON_GLYPH, ic->color); gfx_draw_rect_outline(gx, gy, ICON_GLYPH, ICON_GLYPH, 0x00000000); gfx_draw_string(gx+12, gy+12, "+", 0x00FFFFFF); }
-        else if(i==1){ gfx_draw_filled_circle(gx + ICON_GLYPH/2, gy + ICON_GLYPH/2, ICON_GLYPH/2, ic->color); gfx_draw_circle(gx + ICON_GLYPH/2, gy + ICON_GLYPH/2, ICON_GLYPH/2, 0x00000000); }
+        else if(i==1){ draw_taskmgr_icon(gx, gy); }
         else if(i==2){ draw_clicker_icon(gx, gy); }
         else { draw_notes_icon(gx, gy); }
         int len=0; while(ic->label[len] && len<32) len++;
