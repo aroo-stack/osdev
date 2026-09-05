@@ -232,27 +232,9 @@ static void window_draw_single(int idx){
             gfx_draw_string(kx+8, ky+2, "Kill", 0x00FFFFFF);
         }
     }
-    // Task-driven visible counter inside Clicker and Notes (deferred redraw: task updates window->task_counter + g_needs_redraw, GUI draws)
-    // Race: Clicker/Notes task (PIT preempted) writes single-word volatile int task_counter, GUI reads it in window_draw_single.
-    // On x86 aligned 32-bit writes are atomic (no torn read), and we use same pattern as g_needs_redraw (single int flag) which is safe for this demo.
-    // If we stored a multi-word struct or string, it would need a lock; for a counter it's safe.
-    if(icon_streq(w->title, "Clicker")){
-        char buf[32]; const char *pfx="Count: "; int p=0; while(pfx[p]){ buf[p]=pfx[p]; p++; }
-        char tmp[12]; int t=0; int n=w->task_counter; if(n==0) tmp[t++]='0'; else { char rev[12]; int r=0; while(n){ rev[r++]='0'+n%10; n/=10; } while(r--) tmp[t++]=rev[r]; }
-        for(int i=0;i<t && p<31;i++) buf[p++]=tmp[i]; buf[p]=0;
-        // Draw in bottom-left of Clicker body, e.g., at window-relative 20, h-30
-        int cx = w->x + 20; int cy = w->y + w->h - 30;
-        // Clear background for counter
-        fb_draw_rect(cx-2, cy-2, 120, 12, w->bg_color);
-        gfx_draw_string(cx, cy, buf, 0x00000000);
-    } else if(icon_streq(w->title, "Notes")){
-        char buf[32]; const char *pfx="Count: "; int p=0; while(pfx[p]){ buf[p]=pfx[p]; p++; }
-        char tmp[12]; int t=0; int n=w->task_counter; if(n==0) tmp[t++]='0'; else { char rev[12]; int r=0; while(n){ rev[r++]='0'+n%10; n/=10; } while(r--) tmp[t++]=rev[r]; }
-        for(int i=0;i<t && p<31;i++) buf[p++]=tmp[i]; buf[p]=0;
-        int cx = w->x + 20; int cy = w->y + 110; // below textbox (textbox at 20,40 360x60, so 110 is just below)
-        fb_draw_rect(cx-2, cy-2, 120, 12, w->bg_color);
-        gfx_draw_string(cx, cy, buf, 0x00000000);
-    }
+    // NOTE: task counters (w->task_counter, updated by Clicker/Notes tasks) are no
+    // longer drawn inside the windows themselves - they are only visible in Task
+    // Manager, which reads PIT tick/CPU% counters directly. Counting still happens.
     {
         int rx = w->x + w->w - RESIZE_HANDLE;
         int ry = w->y + w->h - RESIZE_HANDLE;
