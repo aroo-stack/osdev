@@ -17,6 +17,36 @@ static int icon_streq(const char *a, const char *b);
 struct window windows[MAX_WINDOWS];
 int window_count = 0;
 int z_order[MAX_WINDOWS]; // indices sorted back->front
+// Session-persistent Notes text: lives in .bss for the whole boot session,
+// OUTSIDE the window struct that window_close's array shift destroys.
+// BSS-zero at boot -> fresh boot (relaunch QEMU) starts empty: session-only
+// by construction, no disk involved.
+static char notes_saved[513];
+static int notes_saved_len = 0;
+// Copy live textbox -> session buffer (called on close, before destruction).
+static void notes_save_from(struct textbox *tb){
+    int len = tb->len;
+    if(len > tb->max_len) len = tb->max_len;
+    if(len > 512) len = 512;
+    for(int i=0;i<len;i++) notes_saved[i] = tb->buffer[i];
+    notes_saved[len] = 0;
+    notes_saved_len = len;
+}
+// Copy session buffer -> fresh Notes window textbox. Cursor model is
+// append-at-len with no scroll-offset field, so setting len puts the cursor
+// at end of text by construction; focus/blink reset to defaults.
+static void notes_restore_to(int nid){
+    struct textbox *tb = &windows[nid].tbox;
+    int len = notes_saved_len;
+    if(len > tb->max_len) len = tb->max_len;
+    if(len > 512) len = 512;
+    for(int i=0;i<len;i++) tb->buffer[i] = notes_saved[i];
+    tb->buffer[len] = 0;
+    tb->len = len;
+    tb->focused = 0;
+    tb->cursor_visible = 1;
+    tb->blink_counter = 0;
+}
 // drag state - must be zeroed at boot (BSS) and explicitly reset in window_manager_init
 static int dragging = 0;
 static int drag_win = -1;
@@ -222,6 +252,9 @@ static void window_draw_single(int idx){
         int wx = w->x + 20, wy = w->y + 108;
         fb_draw_rect(wx - 2, wy - 2, 120, 12, w->bg_color); // clear stale digits ("10" -> "9")
         gfx_draw_string(wx, wy, line, 0x00000000);
+        // Session-persistence indicator: text is snapshotted on every close
+        // and restored on reopen, until reboot (BSS buffer, no disk).
+        gfx_draw_string(wx + 130, wy, "autosaved (session)", 0x00000000);
     }
     if(w->title[0]=='T' && w->title[1]=='a' && w->title[5]=='M'){
         extern void pit_get_task_ticks(int *gui, int *a, int *b);
@@ -561,7 +594,7 @@ int desktop_icon_handle_click(int x, int y){
                     w_strcpy(windows[nid].title, "Notes", 32);
                     windows[nid].bg_color=0x00D0D0FF; windows[nid].title_color=0x00993333; windows[nid].border_color=0x00000000;
                     windows[nid].visible=1; windows[nid].minimized=0; windows[nid].z=window_count; windows[nid].has_button=0; windows[nid].has_textbox=1;
-                    windows[nid].tbox.x=20; windows[nid].tbox.y=40; windows[nid].tbox.w=360; windows[nid].tbox.h=60; windows[nid].tbox.max_len=512; windows[nid].tbox.len=0; windows[nid].tbox.buffer[0]=0; windows[nid].tbox.focused=0; windows[nid].tbox.cursor_visible=1; windows[nid].tbox.blink_counter=0;
+                    windows[nid].tbox.x=20; windows[nid].tbox.y=40; windows[nid].tbox.w=360; windows[nid].tbox.h=60; windows[nid].tbox.max_len=512; notes_restore_to(nid); // session text (empty on fresh boot)
                     windows[nid].task_counter=0;
                     z_order[window_count]=nid; window_count++; for(int i=0;i<window_count;i++) windows[z_order[i]].z=i;
                     s_puts("DESKTOP: created Notes\n"); g_needs_redraw=1;
@@ -1201,6 +1234,16 @@ void window_close(int idx){
     // If closed window had focused textbox, unfocus (no dangling focused)
     if(windows[idx].has_textbox && windows[idx].tbox.focused){
         s_puts("WM: unfocus textbox of closed window\n");
+    }
+    // Session persist: snapshot Notes text BEFORE the array shift below
+    // destroys the window struct. Every close path (X button, Task Manager
+    // Kill) funnels through here, so no path can lose text by forgetting
+    // to save - this is why there is no manual Save button.
+    if(icon_streq(windows[idx].title, "Notes") && windows[idx].has_textbox){
+        notes_save_from(&windows[idx].tbox);
+        s_puts("WM: Notes text snapshotted to session buffer len ");
+        s_put_dec(notes_saved_len);
+        s_puts("\n");
     }
     // If closed window had pressed button, clear
     if(windows[idx].has_button && windows[idx].btn.pressed){
