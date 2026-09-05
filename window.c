@@ -362,6 +362,47 @@ static void draw_notes_icon(int gx, int gy){
     gfx_draw_line(gx+23, gy+11, gx+25, gy+6, silver);
     fb_draw_rect(gx+25, gy+6, 1, 1, silver);
 }
+// Clicker icon: dark obsidian mouse with glowing cyan left button and click
+// ripples radiating from its top-left, plus a solid offset drop shadow.
+// Painted with solid primitives only (no alpha); ripples are circle outlines
+// drawn first so the body covers their inner parts, leaving outer arcs visible.
+static void draw_clicker_icon(int gx, int gy){
+    uint32_t body = 0x001E293B;    // matte charcoal
+    uint32_t edge = 0x00000000;    // outline
+    uint32_t cyan = 0x0006B6D4;    // glowing left button
+    uint32_t cyan_hi = 0x0067E8F9; // button highlight
+    uint32_t silver = 0x00C0C0C0;  // wheel + divider accents
+    uint32_t dark = 0x000F172A;    // divider + deep edge
+    uint32_t light = 0x00334155;   // top bevel highlight
+    uint32_t shadow = 0x00141824;  // drop shadow
+    int bx = gx + 7, by = gy + 4;  // 18x26 body bbox inside the 32x32 canvas
+    int cx = bx + 9;               // horizontal center
+    // click ripples behind everything (fading cyan arcs, inner parts get covered)
+    gfx_draw_circle(bx, by+2, 13, cyan);
+    gfx_draw_circle(bx, by+2, 17, 0x000891B2);
+    gfx_draw_circle(bx, by+2, 21, 0x000E7490);
+    // drop shadow silhouette (offset down-right)
+    gfx_draw_filled_circle(cx+2, by+10, 9, shadow);
+    fb_draw_rect(bx+2, by+10, 18, 8, shadow);
+    gfx_draw_filled_circle(cx+2, by+18, 9, shadow);
+    // charcoal body capsule (two domes + middle band)
+    gfx_draw_filled_circle(cx, by+8, 9, body);
+    fb_draw_rect(bx, by+8, 18, 8, body);
+    gfx_draw_filled_circle(cx, by+16, 9, body);
+    // glowing cyan left button (rect + dome patch on the left/top)
+    fb_draw_rect(bx+1, by+4, 7, 10, cyan);
+    gfx_draw_filled_circle(bx+4, by+5, 4, cyan);
+    fb_draw_rect(bx+2, by+5, 1, 8, cyan_hi); // inner glow strip
+    // center divider + scroll wheel on top of it
+    gfx_draw_line(cx, by+1, cx, by+14, dark);
+    fb_draw_rect(cx-1, by+9, 3, 5, silver);
+    gfx_draw_rect_outline(cx-1, by+9, 3, 5, dark);
+    // dark capsule outline + light top bevel
+    gfx_draw_circle(cx, by+8, 9, edge);
+    gfx_draw_rect_outline(bx, by+8, 18, 8, edge);
+    gfx_draw_circle(cx, by+16, 9, edge);
+    gfx_draw_line(cx-4, by, cx+4, by, light);
+}
 void desktop_icons_draw(void){
     if(!fb_is_available()) return;
     for(int i=0;i<desktop_icon_count;i++){
@@ -370,7 +411,7 @@ void desktop_icons_draw(void){
         int gx = ix + (ICON_W - ICON_GLYPH)/2; int gy = iy + 4;
         if(i==0){ fb_draw_rect(gx, gy, ICON_GLYPH, ICON_GLYPH, ic->color); gfx_draw_rect_outline(gx, gy, ICON_GLYPH, ICON_GLYPH, 0x00000000); gfx_draw_string(gx+12, gy+12, "+", 0x00FFFFFF); }
         else if(i==1){ gfx_draw_filled_circle(gx + ICON_GLYPH/2, gy + ICON_GLYPH/2, ICON_GLYPH/2, ic->color); gfx_draw_circle(gx + ICON_GLYPH/2, gy + ICON_GLYPH/2, ICON_GLYPH/2, 0x00000000); }
-        else if(i==2){ fb_draw_rect(gx, gy, ICON_GLYPH, ICON_GLYPH, ic->color); gfx_draw_rect_outline(gx, gy, ICON_GLYPH, ICON_GLYPH, 0x00000000); gfx_draw_string(gx+8, gy+12, "C", 0x00FFFFFF); }
+        else if(i==2){ draw_clicker_icon(gx, gy); }
         else { draw_notes_icon(gx, gy); }
         int len=0; while(ic->label[len] && len<32) len++;
         int tx = ix + (ICON_W - len*8)/2; int ty = iy + 4 + ICON_GLYPH + 6;
