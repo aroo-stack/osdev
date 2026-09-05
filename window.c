@@ -172,6 +172,27 @@ static void window_draw_close_button(struct window *w){
     gfx_draw_string(tx, ty, "X", 0x00000000);
 }
 
+// Live word count for the Notes textbox. Single linear scan, no extra state:
+// separators are space and newline; every 0->1 in_word transition starts a word.
+// Trace: "hello world": h starts word 1, space ends it, w starts word 2 -> 2.
+// "  hello   world  ": leading spaces keep in_word=0, hello -> 1, gap ends it,
+// world -> 2, trailing spaces ignored -> 2. "" -> 0. "hello" -> 1.
+// Backspace just shortens len, so recounting from scratch each redraw is always
+// consistent (no stale stored count possible).
+int textbox_word_count(struct textbox *tb){
+    if(!tb) return 0;
+    int len = tb->len;
+    if(len > tb->max_len) len = tb->max_len;
+    if(len > 512) len = 512; // buffer is 513 incl. NUL; never scan past it
+    int count = 0, in_word = 0;
+    for(int i=0;i<len;i++){
+        char c = tb->buffer[i];
+        if(c==' ' || c=='\n') in_word = 0;
+        else if(!in_word){ in_word = 1; count++; }
+    }
+    return count;
+}
+
 static void window_draw_single(int idx){
     struct window *w = &windows[idx];
     if(!w->visible || w->minimized) return;
@@ -184,6 +205,24 @@ static void window_draw_single(int idx){
     window_draw_close_button(w);
     window_draw_button(w);
     window_draw_textbox(w);
+    // Live word count, Notes only, below its textbox (textbox at window-relative
+    // 20,40 size 360x60, so bottom edge is y=100; "Words: N" goes at 20,108).
+    // Counts words in the buffer (NOT task ticks - the removed in-window counter);
+    // recomputed from scratch on every redraw, and every keystroke/backspace sets
+    // g_needs_redraw, so the display is always live without storing count state.
+    if(w->has_textbox && icon_streq(w->title, "Notes")){
+        int wc = textbox_word_count(&w->tbox);
+        char line[32]; const char *pfx = "Words: "; int p = 0;
+        while(pfx[p]){ line[p] = pfx[p]; p++; }
+        char tmp[12]; int t = 0, n = wc;
+        if(n == 0) tmp[t++] = '0';
+        else { char rev[12]; int r = 0; while(n > 0){ rev[r++] = (char)('0' + n % 10); n /= 10; } while(r > 0){ r--; tmp[t++] = rev[r]; } }
+        for(int i = 0; i < t && p < 31; i++) line[p++] = tmp[i];
+        line[p] = 0;
+        int wx = w->x + 20, wy = w->y + 108;
+        fb_draw_rect(wx - 2, wy - 2, 120, 12, w->bg_color); // clear stale digits ("10" -> "9")
+        gfx_draw_string(wx, wy, line, 0x00000000);
+    }
     if(w->title[0]=='T' && w->title[1]=='a' && w->title[5]=='M'){
         extern void pit_get_task_ticks(int *gui, int *a, int *b);
         extern void pit_get_cpu_percent(int *gui_pct, int *a_pct, int *b_pct);
