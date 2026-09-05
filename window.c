@@ -327,40 +327,30 @@ void desktop_icons_init(void){
     desktop_icon_count = 4;
     s_puts("DESKTOP: icons init 4 at (20,40) New Window, (20,140) Task Manager, (20,240) Clicker, (20,340) Notes\n");
 }
-// Notes icon: white notepad sheet with gray rules, teal top bar, silver spiral
-// binding, navy fountain pen, and a solid offset drop shadow. Painted with
-// solid primitives only (no alpha blending available); rounded paper corners
-// are faked by narrowing the top/bottom rows since the wallpaper behind varies.
+// Notes icon: strict flat 2D text-editor glyph. Solid white sheet with geometric
+// rounded corners, sky-blue header banner, exactly three medium-gray text bars.
+// Transparent canvas (no shadow/frame), zero gradients, zero depth: only solid
+// fb_draw_rect fills. Rounded corners are faked by narrowing the top/bottom
+// rows since the wallpaper behind varies.
 static void draw_notes_icon(int gx, int gy){
-    uint32_t paper = 0x00F9F9FB;   // off-white sheet
-    uint32_t rule = 0x00E2E8F0;    // faint blue-gray rules
-    uint32_t teal = 0x000EA5E9;    // top accent bar
-    uint32_t silver = 0x00C0C0C0;  // spiral rings + pen nib
-    uint32_t navy = 0x001E3A8A;    // pen barrel
-    uint32_t shadow = 0x002F3B4C;  // drop shadow
+    uint32_t paper = 0x00FFFFFF;   // solid white sheet
+    uint32_t header = 0x000066FF;  // vibrant sky-blue banner
+    uint32_t bar = 0x0064748B;     // medium-gray text bars
     int px = gx + 6, py = gy + 3;  // 20x26 paper centered in the 32x32 canvas
-    // drop shadow behind everything (offset down-right, stays inside canvas)
-    fb_draw_rect(px+2, py+2, 20, 26, shadow);
-    // paper with rounded corners (narrowed top/bottom rows)
+    // paper body with rounded corners (narrowed top/bottom rows)
     fb_draw_rect(px+2, py, 16, 1, paper);
     fb_draw_rect(px+1, py+1, 18, 1, paper);
     fb_draw_rect(px, py+2, 20, 22, paper);
     fb_draw_rect(px+1, py+24, 18, 1, paper);
     fb_draw_rect(px+2, py+25, 16, 1, paper);
-    // teal accent bar across the top
-    fb_draw_rect(px, py+3, 20, 2, teal);
-    // horizontal rules
-    for(int y = py+8; y <= py+22; y += 4) fb_draw_rect(px+3, y, 14, 1, rule);
-    // spiral binding: 4 silver rings straddling the top edge
-    for(int k=0;k<4;k++) gfx_draw_circle(px+3+k*5, py+1, 2, silver);
-    // pen barrel: 45-degree navy shaft (3 parallel lines for thickness)
-    gfx_draw_line(gx+4, gy+27, gx+22, gy+9, navy);
-    gfx_draw_line(gx+5, gy+27, gx+23, gy+9, navy);
-    gfx_draw_line(gx+4, gy+28, gx+22, gy+10, navy);
-    // pen nib: silver V converging to the tip
-    gfx_draw_line(gx+22, gy+9, gx+25, gy+6, silver);
-    gfx_draw_line(gx+23, gy+11, gx+25, gy+6, silver);
-    fb_draw_rect(gx+25, gy+6, 1, 1, silver);
+    // sky-blue header banner across the top edge (follows the rounded top rows)
+    fb_draw_rect(px+2, py, 16, 1, header);
+    fb_draw_rect(px+1, py+1, 18, 1, header);
+    fb_draw_rect(px, py+2, 20, 2, header);
+    // exactly three gray text bars
+    fb_draw_rect(px+4, py+9, 12, 3, bar);
+    fb_draw_rect(px+4, py+14, 12, 3, bar);
+    fb_draw_rect(px+4, py+19, 12, 3, bar);
 }
 // Clicker icon: dark obsidian mouse with glowing cyan left button and click
 // ripples radiating from its top-left, plus a solid offset drop shadow.
