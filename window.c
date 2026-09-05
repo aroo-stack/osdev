@@ -12,6 +12,7 @@ static void w_strcpy(char *dst, const char *src, int n){
     for(int i=0;i<n-1;i++){ dst[i]=src[i]; if(!src[i]) break; }
     dst[n-1]=0;
 }
+static int icon_streq(const char *a, const char *b);
 
 struct window windows[MAX_WINDOWS];
 int window_count = 0;
@@ -185,29 +186,72 @@ static void window_draw_single(int idx){
     window_draw_textbox(w);
     if(w->title[0]=='T' && w->title[1]=='a' && w->title[5]=='M'){
         extern void pit_get_task_ticks(int *gui, int *a, int *b);
-        int gui=0,a=0,b=0;
+        extern void pit_get_cpu_percent(int *gui_pct, int *a_pct, int *b_pct);
+        extern int task_exists(int id);
+        int gui=0,a=0,b=0; int gui_pct=0,a_pct=0,b_pct=0;
         pit_get_task_ticks(&gui,&a,&b);
-        char line1[32]; char line2[32]; char line3[32];
+        pit_get_cpu_percent(&gui_pct,&a_pct,&b_pct);
+        // Clicker is task id 1, Notes is task id 2. Killed tasks are not shown.
+        int show_clicker = task_exists(1);
+        int show_notes = task_exists(2);
+        char line1[48]; char line2[48]; char line3[48];
         {
             const char *pfx="GUI: "; int p=0; while(pfx[p]){ line1[p]=pfx[p]; p++; }
-            char tmp[12]; int t=0; int n=gui; if(n==0) tmp[t++]='0'; else { char rev[12]; int r=0; while(n){ rev[r++]='0'+n%10; n/=10; } while(r--) tmp[t++]=rev[r]; }
-            for(int i=0;i<t && p<31;i++) line1[p++]=tmp[i]; line1[p]=0;
+            char tmp[16]; int t=0; int n=gui; if(n==0) tmp[t++]='0'; else { char rev[12]; int r=0; while(n){ rev[r++]='0'+n%10; n/=10; } while(r--) tmp[t++]=rev[r]; }
+            tmp[t++]=' '; tmp[t++]='('; char pct[4]; int pt=0; int pn=gui_pct; if(pn==0) pct[pt++]='0'; else { char r2[4]; int rr=0; while(pn){ r2[rr++]='0'+pn%10; pn/=10; } while(rr--) pct[pt++]=r2[rr]; } for(int i=0;i<pt && t<15;i++) tmp[t++]=pct[i]; tmp[t++]= '%'; tmp[t++]=')';
+            for(int i=0;i<t && p<47;i++) line1[p++]=tmp[i]; line1[p]=0;
         }
-        {
-            const char *pfx="TaskA: "; int p=0; while(pfx[p]){ line2[p]=pfx[p]; p++; }
-            char tmp[12]; int t=0; int n=a; if(n==0) tmp[t++]='0'; else { char rev[12]; int r=0; while(n){ rev[r++]='0'+n%10; n/=10; } while(r--) tmp[t++]=rev[r]; }
-            for(int i=0;i<t && p<31;i++) line2[p++]=tmp[i]; line2[p]=0;
+        if(show_clicker){
+            const char *pfx="Clicker: "; int p=0; while(pfx[p]){ line2[p]=pfx[p]; p++; }
+            char tmp[16]; int t=0; int n=a; if(n==0) tmp[t++]='0'; else { char rev[12]; int r=0; while(n){ rev[r++]='0'+n%10; n/=10; } while(r--) tmp[t++]=rev[r]; }
+            tmp[t++]=' '; tmp[t++]='('; char pct[4]; int pt=0; int pn=a_pct; if(pn==0) pct[pt++]='0'; else { char r2[4]; int rr=0; while(pn){ r2[rr++]='0'+pn%10; pn/=10; } while(rr--) pct[pt++]=r2[rr]; } for(int i=0;i<pt && t<15;i++) tmp[t++]=pct[i]; tmp[t++]= '%'; tmp[t++]=')';
+            for(int i=0;i<t && p<47;i++) line2[p++]=tmp[i]; line2[p]=0;
+        } else {
+            line2[0]=0; // Clicker task killed
         }
-        {
-            const char *pfx="TaskB: "; int p=0; while(pfx[p]){ line3[p]=pfx[p]; p++; }
-            char tmp[12]; int t=0; int n=b; if(n==0) tmp[t++]='0'; else { char rev[12]; int r=0; while(n){ rev[r++]='0'+n%10; n/=10; } while(r--) tmp[t++]=rev[r]; }
-            for(int i=0;i<t && p<31;i++) line3[p++]=tmp[i]; line3[p]=0;
+        if(show_notes){
+            const char *pfx="Notes: "; int p=0; while(pfx[p]){ line3[p]=pfx[p]; p++; }
+            char tmp[16]; int t=0; int n=b; if(n==0) tmp[t++]='0'; else { char rev[12]; int r=0; while(n){ rev[r++]='0'+n%10; n/=10; } while(r--) tmp[t++]=rev[r]; }
+            tmp[t++]=' '; tmp[t++]='('; char pct[4]; int pt=0; int pn=b_pct; if(pn==0) pct[pt++]='0'; else { char r2[4]; int rr=0; while(pn){ r2[rr++]='0'+pn%10; pn/=10; } while(rr--) pct[pt++]=r2[rr]; } for(int i=0;i<pt && t<15;i++) tmp[t++]=pct[i]; tmp[t++]= '%'; tmp[t++]=')';
+            for(int i=0;i<t && p<47;i++) line3[p++]=tmp[i]; line3[p]=0;
+        } else {
+            line3[0]=0;
         }
         int tx = w->x + 10;
         int ty = w->y + 30;
         gfx_draw_string(tx, ty, line1, 0x00000000);
-        gfx_draw_string(tx, ty+12, line2, 0x00000000);
-        gfx_draw_string(tx, ty+24, line3, 0x00000000);
+        if(show_clicker) gfx_draw_string(tx, ty+12, line2, 0x00000000);
+        if(show_notes) gfx_draw_string(tx, ty+24, line3, 0x00000000);
+        // Kill buttons for Clicker/Notes only - GUI has no button (structurally no handler for it)
+        // Trace: Kill at window-relative (200,42) size 40x12 for Clicker, (200,54) for Notes
+        for(int tid=1; tid<=2; tid++){
+            if(!task_exists(tid)) continue; // killed task no longer shown, no button
+            int kx = w->x + 200; int ky = w->y + (tid==1?42:54); int kw=40, kh=12;
+            fb_draw_rect(kx, ky, kw, kh, 0x00FF4444); // red Kill
+            gfx_draw_rect_outline(kx, ky, kw, kh, 0x00000000);
+            gfx_draw_string(kx+8, ky+2, "Kill", 0x00FFFFFF);
+        }
+    }
+    // Task-driven visible counter inside Clicker and Notes (deferred redraw: task updates window->task_counter + g_needs_redraw, GUI draws)
+    // Race: Clicker/Notes task (PIT preempted) writes single-word volatile int task_counter, GUI reads it in window_draw_single.
+    // On x86 aligned 32-bit writes are atomic (no torn read), and we use same pattern as g_needs_redraw (single int flag) which is safe for this demo.
+    // If we stored a multi-word struct or string, it would need a lock; for a counter it's safe.
+    if(icon_streq(w->title, "Clicker")){
+        char buf[32]; const char *pfx="Count: "; int p=0; while(pfx[p]){ buf[p]=pfx[p]; p++; }
+        char tmp[12]; int t=0; int n=w->task_counter; if(n==0) tmp[t++]='0'; else { char rev[12]; int r=0; while(n){ rev[r++]='0'+n%10; n/=10; } while(r--) tmp[t++]=rev[r]; }
+        for(int i=0;i<t && p<31;i++) buf[p++]=tmp[i]; buf[p]=0;
+        // Draw in bottom-left of Clicker body, e.g., at window-relative 20, h-30
+        int cx = w->x + 20; int cy = w->y + w->h - 30;
+        // Clear background for counter
+        fb_draw_rect(cx-2, cy-2, 120, 12, w->bg_color);
+        gfx_draw_string(cx, cy, buf, 0x00000000);
+    } else if(icon_streq(w->title, "Notes")){
+        char buf[32]; const char *pfx="Count: "; int p=0; while(pfx[p]){ buf[p]=pfx[p]; p++; }
+        char tmp[12]; int t=0; int n=w->task_counter; if(n==0) tmp[t++]='0'; else { char rev[12]; int r=0; while(n){ rev[r++]='0'+n%10; n/=10; } while(r--) tmp[t++]=rev[r]; }
+        for(int i=0;i<t && p<31;i++) buf[p++]=tmp[i]; buf[p]=0;
+        int cx = w->x + 20; int cy = w->y + 110; // below textbox (textbox at 20,40 360x60, so 110 is just below)
+        fb_draw_rect(cx-2, cy-2, 120, 12, w->bg_color);
+        gfx_draw_string(cx, cy, buf, 0x00000000);
     }
     {
         int rx = w->x + w->w - RESIZE_HANDLE;
@@ -278,8 +322,10 @@ void desktop_icons_init(void){
     desktop_icon_count = 0; selected_icon = -1; last_click_icon = -1; last_click_tick = -1000;
     desktop_icons[0].x = 20; desktop_icons[0].y = 40; w_strcpy(desktop_icons[0].label, "New Window", 32); desktop_icons[0].color = 0x004A90D9; desktop_icons[0].selected = 0;
     desktop_icons[1].x = 20; desktop_icons[1].y = 140; w_strcpy(desktop_icons[1].label, "Task Manager", 32); desktop_icons[1].color = 0x0030A030; desktop_icons[1].selected = 0;
-    desktop_icon_count = 2;
-    s_puts("DESKTOP: icons init 2 at (20,40) New Window, (20,140) Task Manager\n");
+    desktop_icons[2].x = 20; desktop_icons[2].y = 240; w_strcpy(desktop_icons[2].label, "Clicker", 32); desktop_icons[2].color = 0x00336699; desktop_icons[2].selected = 0;
+    desktop_icons[3].x = 20; desktop_icons[3].y = 340; w_strcpy(desktop_icons[3].label, "Notes", 32); desktop_icons[3].color = 0x00993333; desktop_icons[3].selected = 0;
+    desktop_icon_count = 4;
+    s_puts("DESKTOP: icons init 4 at (20,40) New Window, (20,140) Task Manager, (20,240) Clicker, (20,340) Notes\n");
 }
 void desktop_icons_draw(void){
     if(!fb_is_available()) return;
@@ -288,7 +334,9 @@ void desktop_icons_draw(void){
         int ix = ic->x; int iy = ic->y;
         int gx = ix + (ICON_W - ICON_GLYPH)/2; int gy = iy + 4;
         if(i==0){ fb_draw_rect(gx, gy, ICON_GLYPH, ICON_GLYPH, ic->color); gfx_draw_rect_outline(gx, gy, ICON_GLYPH, ICON_GLYPH, 0x00000000); gfx_draw_string(gx+12, gy+12, "+", 0x00FFFFFF); }
-        else { gfx_draw_filled_circle(gx + ICON_GLYPH/2, gy + ICON_GLYPH/2, ICON_GLYPH/2, ic->color); gfx_draw_circle(gx + ICON_GLYPH/2, gy + ICON_GLYPH/2, ICON_GLYPH/2, 0x00000000); }
+        else if(i==1){ gfx_draw_filled_circle(gx + ICON_GLYPH/2, gy + ICON_GLYPH/2, ICON_GLYPH/2, ic->color); gfx_draw_circle(gx + ICON_GLYPH/2, gy + ICON_GLYPH/2, ICON_GLYPH/2, 0x00000000); }
+        else if(i==2){ fb_draw_rect(gx, gy, ICON_GLYPH, ICON_GLYPH, ic->color); gfx_draw_rect_outline(gx, gy, ICON_GLYPH, ICON_GLYPH, 0x00000000); gfx_draw_string(gx+8, gy+12, "C", 0x00FFFFFF); }
+        else { gfx_draw_filled_circle(gx + ICON_GLYPH/2, gy + ICON_GLYPH/2, ICON_GLYPH/2, ic->color); gfx_draw_circle(gx + ICON_GLYPH/2, gy + ICON_GLYPH/2, ICON_GLYPH/2, 0x00000000); gfx_draw_string(gx+12, gy+12, "N", 0x00FFFFFF); }
         int len=0; while(ic->label[len] && len<32) len++;
         int tx = ix + (ICON_W - len*8)/2; int ty = iy + 4 + ICON_GLYPH + 6;
         if(ic->selected){ int bg_w = len*8 + 6; int bg_h = 10; int bg_x = tx - 3; int bg_y = ty - 1; fb_draw_rect(bg_x, bg_y, bg_w, bg_h, 0x000000FF); gfx_draw_string(tx, ty, ic->label, 0x00FFFFFF); }
@@ -312,7 +360,59 @@ int desktop_icon_handle_click(int x, int y){
         s_puts("DESKTOP: double-click icon "); s_put_dec(idx); s_puts("\n");
         for(int i=0;i<desktop_icon_count;i++) desktop_icons[i].selected = (i==idx); selected_icon = idx; last_click_icon = -1; last_click_tick = -1000;
         if(idx==0){ s_puts("DESKTOP: action New Window\n"); window_create_new(); }
-        else if(idx==1){ int found=-1; for(int i=0;i<window_count;i++) if(icon_streq(windows[i].title, "Task Manager")) { found=i; break; } if(found!=-1){ s_puts("DESKTOP: action Task Manager bring to front\n"); if(windows[found].minimized){ windows[found].minimized=0; s_puts("DESKTOP: unminimize Task Manager\n"); } window_bring_to_front(found); } else { s_puts("DESKTOP: action Task Manager create (was closed)\n"); if(window_count < MAX_WINDOWS){ int nid = window_count; windows[nid].x=600; windows[nid].y=100; windows[nid].w=300; windows[nid].h=200; w_strcpy(windows[nid].title, "Task Manager", 32); windows[nid].bg_color=0x00F0F0F0; windows[nid].title_color=0x00333333; windows[nid].border_color=0x00000000; windows[nid].visible=1; windows[nid].minimized=0; windows[nid].z=window_count; windows[nid].has_button=0; windows[nid].has_textbox=0; z_order[window_count]=nid; window_count++; for(int i=0;i<window_count;i++) windows[z_order[i]].z=i; s_puts("DESKTOP: created Task Manager\n"); g_needs_redraw=1; } else s_puts("DESKTOP: cannot create Task Manager - at max\n"); } }
+        else if(idx==1){ int found=-1; for(int i=0;i<window_count;i++) if(icon_streq(windows[i].title, "Task Manager")) { found=i; break; } if(found!=-1){ s_puts("DESKTOP: action Task Manager bring to front\n"); if(windows[found].minimized){ windows[found].minimized=0; s_puts("DESKTOP: unminimize Task Manager\n"); } window_bring_to_front(found); } else { s_puts("DESKTOP: action Task Manager create (was closed)\n"); if(window_count < MAX_WINDOWS){ int nid = window_count; windows[nid].x=600; windows[nid].y=100; windows[nid].w=300; windows[nid].h=200; w_strcpy(windows[nid].title, "Task Manager", 32); windows[nid].bg_color=0x00F0F0F0; windows[nid].title_color=0x00333333; windows[nid].border_color=0x00000000; windows[nid].visible=1; windows[nid].minimized=0; windows[nid].z=window_count; windows[nid].has_button=0; windows[nid].has_textbox=0; windows[nid].task_counter=0; z_order[window_count]=nid; window_count++; for(int i=0;i<window_count;i++) windows[z_order[i]].z=i; s_puts("DESKTOP: created Task Manager\n"); g_needs_redraw=1; } else s_puts("DESKTOP: cannot create Task Manager - at max\n"); } }
+        else if(idx==2){ // Clicker
+            int found=-1; for(int i=0;i<window_count;i++) if(icon_streq(windows[i].title, "Clicker")) { found=i; break; }
+            if(found!=-1){ s_puts("DESKTOP: action Clicker bring to front\n"); if(windows[found].minimized){ windows[found].minimized=0; } window_bring_to_front(found); }
+            else {
+                s_puts("DESKTOP: action Clicker create (was closed)\n");
+                // Recreate window + task pair fresh - check if Clicker task exists, if not, recreate
+                // Clicker task permanently owns id 1 so UI tid mapping, tick slots and stack vbase stay stable
+                extern void task_clicker_entry(void);
+                extern int task_create_with_id(int want_id, void (*)(void), const char *);
+                extern int task_find_by_name(const char *name);
+                if(task_find_by_name("Clicker")== -1){
+                    s_puts("DESKTOP: recreating Clicker task\n");
+                    task_create_with_id(1, task_clicker_entry, "Clicker");
+                }
+                if(window_count < MAX_WINDOWS){
+                    int nid = window_count;
+                    windows[nid].x=100; windows[nid].y=100; windows[nid].w=400; windows[nid].h=300;
+                    w_strcpy(windows[nid].title, "Clicker", 32);
+                    windows[nid].bg_color=0x00E0E0E0; windows[nid].title_color=0x00336699; windows[nid].border_color=0x00000000;
+                    windows[nid].visible=1; windows[nid].minimized=0; windows[nid].z=window_count; windows[nid].has_button=1;
+                    windows[nid].btn.x=20; windows[nid].btn.y=40; windows[nid].btn.w=120; windows[nid].btn.h=30; w_strcpy(windows[nid].btn.label, "Click Me", 32); windows[nid].btn.pressed=0; windows[nid].btn.clicks=0;
+                    windows[nid].has_textbox=0; windows[nid].task_counter=0;
+                    z_order[window_count]=nid; window_count++; for(int i=0;i<window_count;i++) windows[z_order[i]].z=i;
+                    s_puts("DESKTOP: created Clicker\n"); g_needs_redraw=1;
+                } else s_puts("DESKTOP: cannot create Clicker - at max\n");
+            }
+        }
+        else if(idx==3){ // Notes
+            int found=-1; for(int i=0;i<window_count;i++) if(icon_streq(windows[i].title, "Notes")) { found=i; break; }
+            if(found!=-1){ s_puts("DESKTOP: action Notes bring to front\n"); if(windows[found].minimized){ windows[found].minimized=0; } window_bring_to_front(found); }
+            else {
+                s_puts("DESKTOP: action Notes create (was closed)\n");
+                extern void task_notes_entry(void);
+                extern int task_create_with_id(int want_id, void (*)(void), const char *);
+                extern int task_find_by_name(const char *name);
+                if(task_find_by_name("Notes")== -1){
+                    s_puts("DESKTOP: recreating Notes task\n");
+                    task_create_with_id(2, task_notes_entry, "Notes");
+                }
+                if(window_count < MAX_WINDOWS){
+                    int nid = window_count;
+                    windows[nid].x=250; windows[nid].y=180; windows[nid].w=400; windows[nid].h=300;
+                    w_strcpy(windows[nid].title, "Notes", 32);
+                    windows[nid].bg_color=0x00D0D0FF; windows[nid].title_color=0x00993333; windows[nid].border_color=0x00000000;
+                    windows[nid].visible=1; windows[nid].minimized=0; windows[nid].z=window_count; windows[nid].has_button=0; windows[nid].has_textbox=1;
+                    windows[nid].tbox.x=20; windows[nid].tbox.y=40; windows[nid].tbox.w=360; windows[nid].tbox.h=60; windows[nid].tbox.max_len=512; windows[nid].tbox.len=0; windows[nid].tbox.buffer[0]=0; windows[nid].tbox.focused=0; windows[nid].tbox.cursor_visible=1; windows[nid].tbox.blink_counter=0;
+                    windows[nid].task_counter=0;
+                    z_order[window_count]=nid; window_count++; for(int i=0;i<window_count;i++) windows[z_order[i]].z=i;
+                    s_puts("DESKTOP: created Notes\n"); g_needs_redraw=1;
+                } else s_puts("DESKTOP: cannot create Notes - at max\n");
+            }
+        }
         g_needs_redraw=1; return 1;
     } else {
         for(int i=0;i<desktop_icon_count;i++) desktop_icons[i].selected = (i==idx); selected_icon = idx; last_click_icon = idx; last_click_tick = now; s_puts("DESKTOP: select icon "); s_put_dec(idx); s_puts("\n"); g_needs_redraw=1; return 1;
@@ -327,10 +427,10 @@ void window_manager_init(void){
     // Defense: explicitly reset BSS-dependent drag/button state even though boot.s now zeroes BSS
     // Without BSS zeroing, these would be garbage and first window_bring_to_front could read stale z_order or dragging flag
     dragging = 0; drag_win = -1; drag_off_x = 0; drag_off_y = 0;
-    // Create 3 overlapping windows - positions chosen to show overlap
-    // Window 0 - back
+    // Create 2 overlapping windows - positions chosen to show overlap
+    // Window 0 - back (Clicker)
     windows[0].x = 100; windows[0].y = 100; windows[0].w = 400; windows[0].h = 300;
-    w_strcpy(windows[0].title, "Window 1", 32);
+    w_strcpy(windows[0].title, "Clicker", 32);
     windows[0].bg_color = 0x00E0E0E0; // light gray
     windows[0].title_color = 0x00336699; // steel blue
     windows[0].border_color = 0x00000000;
@@ -343,7 +443,7 @@ void window_manager_init(void){
     windows[0].btn.clicks = 0;
 
     windows[1].x = 250; windows[1].y = 180; windows[1].w = 400; windows[1].h = 300;
-    w_strcpy(windows[1].title, "Window 2", 32);
+    w_strcpy(windows[1].title, "Notes", 32);
     windows[1].bg_color = 0x00D0D0FF; // light blue
     windows[1].title_color = 0x00993333; // reddish
     windows[1].border_color = 0x00000000;
@@ -358,18 +458,20 @@ void window_manager_init(void){
     windows[1].tbox.focused = 0;
     windows[1].tbox.cursor_visible = 1;
     windows[1].tbox.blink_counter = 0;
+    windows[0].task_counter = 0;
+    windows[1].task_counter = 0;
 
     windows[2].x = 0; windows[2].y = 0; windows[2].w = 0; windows[2].h = 0;
-    windows[2].visible = 0; windows[2].minimized = 0;
+    windows[2].visible = 0; windows[2].minimized = 0; windows[2].task_counter = 0;
     windows[3].x = 0; windows[3].y = 0; windows[3].w = 0; windows[3].h = 0;
-    windows[3].visible = 0; windows[3].minimized = 0;
+    windows[3].visible = 0; windows[3].minimized = 0; windows[3].task_counter = 0;
 
     window_count = 2;
     // z_order 0..1 back->front corresponds to windows index order initially
     for(int i=0;i<window_count;i++) z_order[i]=i;
 
     desktop_icons_init();
-    s_puts("WM: created 2 windows (Window 1 button, Window 2 textbox) + 2 desktop icons\n");
+    s_puts("WM: created 2 windows (Clicker button, Notes textbox) + 4 desktop icons\n");
     // Build wallpaper cache once (draws Bliss then snapshots, measures flat vs Bliss vs blit)
     wallpaper_cache_build_once();
     window_manager_draw_all();
@@ -430,19 +532,7 @@ void window_manager_init(void){
         }
         s_puts("CHECK QEMU artifact: width="); s_put_dec(w); s_puts(" height="); s_put_dec(h); s_puts(" pitch="); s_put_dec(fb_get_size_bytes()/h); s_puts(" sky_h="); s_put_dec(sky_h); s_puts("\n");
         // Dump horizon region 455-465 as PPM hex to verify visually - 11 rows
-        s_puts("DUMP_HORIZON_PPM_START\n");
-        s_puts("P3\n1024 11\n255\n");
-        for(int y=sky_h-5; y<=sky_h+5 && y<h; y++){
-            for(int x=0;x<w;x++){
-                uint32_t p = fb_get_front_pixel(x,y);
-                uint8_t r=(p>>16)&0xFF, g=(p>>8)&0xFF, b=p&0xFF;
-                // send as decimal triple
-                s_put_dec(r); s_putc(' '); s_put_dec(g); s_putc(' '); s_put_dec(b); s_putc(' ');
-                if(x%8==7) s_puts("\n");
-            }
-            s_puts("\n");
-        }
-        s_puts("DUMP_HORIZON_PPM_END\n");
+        // Horizon dump removed for clean boot - was 11 rows PPM for debugging seam, now verified clean
     }
 }
 
@@ -480,6 +570,7 @@ int window_create_new(void){
     windows[idx].z = window_count;
     windows[idx].has_button = 0;
     windows[idx].has_textbox = 0;
+    windows[idx].task_counter = 0;
     z_order[window_count] = idx;
     window_count++;
     for(int i=0;i<window_count;i++) windows[z_order[i]].z = i;
@@ -888,6 +979,29 @@ int window_is_in_close_button(int idx, int x, int y){
     int by = w->y + 2;
     return (x >= bx && x < bx+CLOSE_BTN_W && y >= by && y < by+CLOSE_BTN_H);
 }
+int window_handle_taskmanager_kill_click(int x, int y){
+    int tm = window_find_by_title("Task Manager");
+    if(tm==-1) return 0;
+    struct window *w = &windows[tm];
+    if(w->minimized || !w->visible) return 0;
+    if(x < w->x || x >= w->x + w->w || y < w->y || y >= w->y + w->h) return 0;
+    for(int tid=1; tid<=2; tid++){
+        int kx = w->x + 200; int ky = w->y + (tid==1?42:54); int kw=40, kh=12;
+        if(x >= kx && x < kx+kw && y >= ky && y < ky+kh){
+            // Kill task and its window - trace: task_kill frees PMM frames at 0x03000000+id*8192 (2 pages), unmaps, shifts task_list, decrements num_tasks
+            // window_close for "Clicker" (id1) or "Notes" (id2) shifts windows array and z_order, cleans dangling drag/resize
+            extern int task_kill(int id);
+            const char *wtitle = (tid==1) ? "Clicker" : "Notes";
+            int widx = window_find_by_title(wtitle);
+            s_puts("TASKMGR: Kill Task "); s_put_dec(tid); s_puts(" '"); s_puts(wtitle); s_puts("' window idx "); s_put_dec(widx); s_puts("\n");
+            task_kill(tid);
+            if(widx != -1) window_close(widx);
+            g_needs_redraw = 1;
+            return 1;
+        }
+    }
+    return 0;
+}
 
 int window_handle_minimize_click(int x, int y){
     // Check topmost window's minimize button first (before drag)
@@ -918,6 +1032,8 @@ int window_handle_close_click(int x, int y){
 void window_close(int idx){
     if(idx<0||idx>=window_count) return;
     s_puts("WM: closing Window "); s_put_dec(idx+1); s_puts(" title "); s_puts(windows[idx].title); s_puts("\n");
+    // Save title for app handling before shift (Clicker/Notes are apps that can be reopened via desktop icon, unlike generic "+" windows)
+    char closed_title[32]; for(int i=0;i<32;i++) closed_title[i]=windows[idx].title[i];
     // If closed window was being dragged/resized, cancel
     if(dragging && drag_win==idx){
         dragging=0; drag_win=-1;
@@ -938,6 +1054,12 @@ void window_close(int idx){
     // Remove from z_order: find pos of idx in z_order, remove it, and adjust indices > idx
     int pos=-1;
     for(int i=0;i<window_count;i++) if(z_order[i]==idx) pos=i;
+    if(pos==-1){
+        // Defensive: idx not in z_order means window/z_order desync; proceeding would write
+        // z_order[-1] (wild write into adjacent .bss). Refuse loudly instead of corrupting.
+        s_puts("WM: close desync, idx not in z_order - refusing\n");
+        return;
+    }
     // Shift windows array down by one from idx+1 to end
     for(int i=idx;i<window_count-1;i++) windows[i]=windows[i+1];
     // Adjust z_order: remove entry at pos, and for any entry > idx, decrement by 1
@@ -964,6 +1086,21 @@ void window_close(int idx){
     // Before: windows[0]=W1,1=W2,2=W3,3=TaskMan, z=[0,2,1,3] (W1 back, W3, W2, TaskMan front)
     // Remove idx 3: windows array shifts none (since idx is last), z_order remove pos 3 (value 3) => z=[0,2,1], count 3, no indices >3 to decrement, so z now correctly points to W1(0),W3(1 after shift? Wait W3 was at idx 2, still 2? Actually after shift, windows[2] is still W3, but its old index 2 is now still 2? No, after removing idx 3, windows[0..2] remain W1,W2,W3, indices 0,1,2, and z_order [0,2,1] now correctly points to W1(0), W3(2), W2(1) - W2 is now at idx 1 (was 1), W3 at idx 2 (was 2) - correct.
     // If remove idx 1 (W2) with z=[0,2,1,3]: windows shift: W2 removed, W3 moves from idx2->1, TaskMan from idx3->2. z_order remove pos2 (value1) => [0,2,3] then decrement >1: 2->1,3->2 => [0,1,2] which is W1(0), W3(new1), TaskMan(new2) - correct, no dangling 3.
+    // App handling: Clicker and Notes are apps with associated tasks (ids 1/2). Closing them via X should be treated as app close, not permanent destroy like generic windows.
+    // For generic windows via "+" (Window 3,4...), just close as before. For Clicker/Notes, also ensure task is handled (killed or left) so reopen via icon can recreate fresh pair.
+    // Here we treat close as app close: if closed was Clicker or Notes, also kill its task if it still exists (to keep window/task pair consistent for recreation)
+    // This is simpler than trying to preserve exact task state across close, and matches Task Manager Kill behavior (window+task pair)
+    if(icon_streq(closed_title, "Clicker")){
+        extern int task_kill_by_name(const char *name);
+        int killed = task_kill_by_name("Clicker");
+        if(killed) s_puts("WM: app Clicker closed, task killed for clean reopen\n");
+        else s_puts("WM: app Clicker closed, task already not running\n");
+    } else if(icon_streq(closed_title, "Notes")){
+        extern int task_kill_by_name(const char *name);
+        int killed = task_kill_by_name("Notes");
+        if(killed) s_puts("WM: app Notes closed, task killed\n");
+        else s_puts("WM: app Notes closed, task already not running\n");
+    }
     g_needs_redraw = 1;
 }
 int window_find_by_title(const char *title){

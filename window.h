@@ -12,7 +12,7 @@
 #define RESIZE_HANDLE 12
 #define WIN_MIN_W 150
 #define WIN_MIN_H 100
-#define MAX_ICONS 3
+#define MAX_ICONS 5
 #define ICON_W 64
 #define ICON_H 64
 #define ICON_GLYPH 32
@@ -47,6 +47,7 @@ struct window {
     int has_button;
     struct textbox tbox;
     int has_textbox;
+    volatile int task_counter; // owned by Clicker/Notes tasks, drawn by GUI task - single-word atomic
 };
 extern struct window windows[];
 extern int window_count;
@@ -111,5 +112,6 @@ int window_handle_close_click(int x, int y);
 void window_close(int idx);
 int window_is_in_close_button(int idx, int x, int y);
 int window_find_by_title(const char *title);
+int window_handle_taskmanager_kill_click(int x, int y); // Kill Clicker/Notes tasks and their windows (GUI has none)
 
 #endif

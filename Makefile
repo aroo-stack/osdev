@@ -5,10 +5,18 @@ LDFLAGS = -m elf_i386 -T linker.ld
 
 all: os.iso
 
+# Build stamp: regenerated on EVERY make invocation (phony) so the running
+# kernel always reports exactly which build produced it. kernel.o depends on
+# it, so kernel.o is rebuilt every time too - this defeats any clock-skew
+# staleness for at least the kernel object by construction.
+.PHONY: buildstamp.h
+buildstamp.h:
+	echo '#define BUILD_STAMP "'`date -u +"%Y-%m-%d %H:%M:%S UTC"`'"' > buildstamp.h
+
 boot.o: boot.s
 	$(AS) -f elf32 boot.s -o boot.o
 
-kernel.o: kernel.c
+kernel.o: kernel.c buildstamp.h
 	$(CC) $(CFLAGS) -c kernel.c -o kernel.o
 
 gdt.o: gdt.c gdt.h
@@ -80,4 +88,4 @@ run-headless:
 	qemu-system-i386 -cdrom os.iso -serial stdio -display none -vga std -monitor none -m 128
 
 clean:
-	rm -rf *.o kernel.bin os.iso isodir
+	rm -rf *.o kernel.bin os.iso isodir buildstamp.h

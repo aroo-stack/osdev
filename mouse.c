@@ -235,6 +235,8 @@ void mouse_handle_byte(uint8_t data){
                     window_start_drag(new_x, new_y);
                 } else if(window_handle_button_down(new_x, new_y)){
                 } else if(window_handle_textbox_click(new_x, new_y)){
+                } else if(window_handle_taskmanager_kill_click(new_x, new_y)){
+                    // Kill Clicker/Notes task and its window - handled (GUI has no Kill button)
                 } else {
                     int did_redraw = 0;
                     if(fb_is_available()){

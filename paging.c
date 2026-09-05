@@ -101,8 +101,24 @@ void paging_unmap(uint32_t vaddr){
     uint32_t pt_idx = (vaddr >> 12) & 0x3FF;
     uint32_t pd = page_directory[pd_idx];
     if(!(pd & 0x1)) return;
-    uint32_t *table = (uint32_t*)(pd & 0xFFFFF000);
-    table[pt_idx]=0;
+    uint32_t tphys = pd & 0xFFFFF000;
+    // NOTE: table frames for high PDEs live above 4M and are NOT identity-mapped.
+    // Dereferencing tphys raw writes to whatever virtual alias exists there (silent
+    // corruption + ineffective unmap). Mirror paging_map: use the 0x003FF000 temp window.
+    if(tphys < 0x00400000){
+        uint32_t *table = (uint32_t*)tphys;
+        table[pt_idx]=0;
+    } else {
+        uint32_t old = page_table_0[1023];
+        page_table_0[1023] = (tphys & 0xFFFFF000) | 0x03;
+        __asm__ volatile("invlpg (%0)" :: "r"((void*)0x003FF000) : "memory");
+        uint32_t *table = (uint32_t*)0x003FF000;
+        table[pt_idx]=0;
+        __asm__ volatile("invlpg (%0)" :: "r"(vaddr) : "memory");
+        page_table_0[1023] = old;
+        __asm__ volatile("invlpg (%0)" :: "r"((void*)0x003FF000) : "memory");
+        return;
+    }
     __asm__ volatile("invlpg (%0)" :: "r"(vaddr) : "memory");
 }
 

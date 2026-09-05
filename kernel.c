@@ -12,6 +12,7 @@
 #include "window.h"
 #include "pit.h"
 #include "task.h"
+#include "buildstamp.h"
 
 static inline void outb(uint16_t port, uint8_t val) {
     __asm__ volatile ("outb %0, %1" : : "a"(val), "Nd"(port));
@@ -52,11 +53,18 @@ static void vga_puts(const char* s) {
     }
 }
 
-// Phase 15 test tasks - now with yield to avoid starving GUI (fix for fair-share jitter)
-static void task_a_entry(void){
+// App tasks - visible counters in Clicker/Notes via deferred redraw
+// Clicker task (id 1) owns the Clicker window, Notes task (id 2) owns Notes.
+// Each increments its window's task_counter and sets g_needs_redraw.
+// Drawing still happens only in window_do_redraw (GUI task), tasks never call fb_* directly.
+void task_clicker_entry(void){
     int count=0;
     for(;;){
         for(volatile int i=0;i<50000;i++) __asm__ volatile("nop");
+        // Update Clicker's visible counter via shared single-word write (atomic on x86)
+        // Find by title each iteration (handles window_close shifting)
+        { int wi = window_find_by_title("Clicker"); if(wi!=-1) windows[wi].task_counter = count; }
+        extern volatile int g_needs_redraw; g_needs_redraw = 1;
         __asm__ volatile("cli");
         outb(0x3F8, 'A'); outb(0x3F8, ':'); 
         char buf[12]; int n=count++; int len=0; char tmp[12]; int t=0;
@@ -64,16 +72,15 @@ static void task_a_entry(void){
         while(t--) { while(!(inb(0x3F8+5)&0x20)); outb(0x3F8, tmp[t]); }
         outb(0x3F8, '\n');
         __asm__ volatile("sti");
-        // Yield/sleep - previously this was a tight spin (200k nops) that consumed 1/3 CPU and starved GUI to 33Hz
-        // Now we hlt to yield CPU - hlt will wake on next PIT tick and let GUI and other task run, so GUI gets more share
-        // This is the correct fix for a busy-loop test task that does nothing useful: it should sleep, not spin
         for(int i=0;i<5;i++) __asm__ volatile("hlt");
     }
 }
-static void task_b_entry(void){
+void task_notes_entry(void){
     int count=0;
     for(;;){
         for(volatile int i=0;i<50000;i++) __asm__ volatile("nop");
+        { int wi = window_find_by_title("Notes"); if(wi!=-1) windows[wi].task_counter = count; }
+        extern volatile int g_needs_redraw; g_needs_redraw = 1;
         __asm__ volatile("cli");
         outb(0x3F8, 'B'); outb(0x3F8, ':');
         char buf[12]; int n=count++; int len=0; char tmp[12]; int t=0;
@@ -87,6 +94,9 @@ static void task_b_entry(void){
 
 void kernel_main(uint32_t magic, uint32_t mbi_addr) {
     serial_init();
+    serial_puts("BUILD: ");
+    serial_puts(BUILD_STAMP);
+    serial_puts("\n");
     serial_puts("Hello, OS - serial console working\n");
     vga_puts("Hello, OS");
     serial_puts("GDT: installing...\n");
@@ -314,9 +324,9 @@ void kernel_main(uint32_t magic, uint32_t mbi_addr) {
         serial_puts("\n");
     }
     task_init();
-    task_create(task_a_entry, "TaskA");
-    task_create(task_b_entry, "TaskB");
-    serial_puts("TASK: 2 test tasks created, scheduler will preempt on next PIT tick (100Hz)\n");
+    task_create(task_clicker_entry, "Clicker");
+    task_create(task_notes_entry, "Notes");
+    serial_puts("TASK: 2 app tasks created (Clicker id 1, Notes id 2), scheduler will preempt on next PIT tick (100Hz)\n");
     // Note on coexistence: GUI main loop becomes task 0 (current ESP). Mouse IRQ12 and keyboard IRQ1 handlers
     // still work because they are separate IRQs that will interrupt whichever task is running, save that task's
     // context, handle the event (which may set g_needs_redraw), and on return the scheduler may have switched
@@ -331,6 +341,8 @@ void kernel_main(uint32_t magic, uint32_t mbi_addr) {
 
     // Synthetic tests removed: previous Phase 15 drag stress-test (window_start_drag at 110,110 + 20 updates) left Window1 auto-dragged to ~210,210 on every boot.
     // Also removed desktop icon auto-test that created extra windows at boot. Manual live testing now required.
+
+    // Brief pause to let scheduler stabilize before interactive use - no auto window creation
 
     // Uncomment to test exception handling (should print EXCEPTION and halt):
     // volatile int a = 1; volatile int b = 0; volatile int c = a / b; (void)c;
@@ -358,12 +370,26 @@ void kernel_main(uint32_t magic, uint32_t mbi_addr) {
             int gui=0,a=0,b=0;
             pit_get_task_ticks(&gui,&a,&b);
             int m = mouse_get_irqs();
+            // Snapshot scheduler/window state for the heartbeat line (single cli section,
+            // same pattern as neighboring logs; task_list/current_task stable while masked)
+            int hb_pit = pit_get_ticks();
+            int hb_cur = current_task;
+            int hb_ntasks = task_count();
             __asm__ volatile("cli");
-            serial_puts("SCHED: ticks GUI "); 
+            serial_puts("SCHED: ticks GUI ");
             { char tmp[12]; int n=gui; int t=0; if(n==0) tmp[t++]='0'; else while(n){ tmp[t++]='0'+n%10; n/=10; } while(t--) serial_putc(tmp[t]); }
             serial_puts(" A "); { char tmp[12]; int n=a; int t=0; if(n==0) tmp[t++]='0'; else while(n){ tmp[t++]='0'+n%10; n/=10; } while(t--) serial_putc(tmp[t]); }
             serial_puts(" B "); { char tmp[12]; int n=b; int t=0; if(n==0) tmp[t++]='0'; else while(n){ tmp[t++]='0'+n%10; n/=10; } while(t--) serial_putc(tmp[t]); }
             serial_puts(" mouse "); { char tmp[12]; int n=m; int t=0; if(n==0) tmp[t++]='0'; else while(n){ tmp[t++]='0'+n%10; n/=10; } while(t--) serial_putc(tmp[t]); }
+            // Heartbeat: precise last-line state if the system ever freezes (1/sec at 100Hz PIT)
+            // Format: HB pit=<ticks> cur=<current_task pos> tasks=<n> [id:name:state ...] wins=<n> [titles ...]
+            // state: 0=READY 1=RUNNING (both runnable; pause was removed), anything else is corruption
+            serial_puts(" | HB pit "); { char tmp[12]; int n=hb_pit; int t=0; if(n==0) tmp[t++]='0'; else while(n){ tmp[t++]='0'+n%10; n/=10; } while(t--) serial_putc(tmp[t]); }
+            serial_puts(" cur "); { char tmp[12]; int n=hb_cur; int t=0; if(n==0) tmp[t++]='0'; else while(n){ tmp[t++]='0'+n%10; n/=10; } while(t--) serial_putc(tmp[t]); }
+            serial_puts(" tasks "); { char tmp[12]; int n=hb_ntasks; int i=0; if(n==0) tmp[i++]='0'; else while(n){ tmp[i++]='0'+n%10; n/=10; } while(i--) serial_putc(tmp[i]); }
+            for(int i=0;i<hb_ntasks && i<MAX_TASKS;i++){ serial_puts(" ["); { char tmp[12]; int n=task_list[i]->id; int t=0; if(n==0) tmp[t++]='0'; else while(n){ tmp[t++]='0'+n%10; n/=10; } while(t--) serial_putc(tmp[t]); } serial_putc(':'); serial_puts(task_list[i]->name); serial_putc(':'); { char tmp[12]; int n=task_list[i]->state; int t=0; if(n==0) tmp[t++]='0'; else while(n){ tmp[t++]='0'+n%10; n/=10; } while(t--) serial_putc(tmp[t]); } serial_putc(']'); }
+            serial_puts(" wins "); { char tmp[12]; int n=window_count; int i=0; if(n==0) tmp[i++]='0'; else while(n){ tmp[i++]='0'+n%10; n/=10; } while(i--) serial_putc(tmp[i]); }
+            for(int i=0;i<window_count && i<MAX_WINDOWS;i++){ serial_puts(" ["); serial_puts(windows[i].title); serial_putc(']'); }
             serial_puts("\n");
             pit_reset_task_ticks();
             mouse_reset_irqs();

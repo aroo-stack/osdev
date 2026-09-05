@@ -3,6 +3,7 @@
 kernel.bin
 os.iso
 isodir/
+buildstamp.h
 
 # debug/preview output - regenerated, do not track
 horizon*.ppm

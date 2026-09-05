@@ -210,10 +210,21 @@ void irq_handler(struct regs *r) {
             // But not as KEY scancode, as MOUSE-like debug
             return;
         }
+        // Freeze diagnostic: PIT liveness + PIC masks on every unhandled keypress.
+        // If the GUI ever freezes again, hold a key: advancing pit proves PIT is alive
+        // (scheduler stuck picking one task); frozen pit proves PIT died (mask/reprogram).
+        // Masks pinpoint it further (e.g. master bit0=IRQ0 PIT, bit2=cascade for mouse IRQ12).
+        extern int pit_get_ticks(void);
         serial_puts("KEY scancode=");
         serial_put_dec(scancode);
         serial_puts(" hex=");
         serial_put_hex(scancode);
+        serial_puts(" pit=");
+        serial_put_dec((uint32_t)pit_get_ticks());
+        serial_puts(" pic=");
+        serial_put_hex(inb(0x21));
+        serial_puts("/");
+        serial_put_hex(inb(0xA1));
         serial_puts("\n");
     } else if (r->int_no == 44) { // IRQ12 mouse - vector 44 = 0x20+12 = 0x28+4 = 44 (0x2C) - arithmetic confirmed
         uint8_t data = inb(0x60);
