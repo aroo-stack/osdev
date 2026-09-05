@@ -327,6 +327,41 @@ void desktop_icons_init(void){
     desktop_icon_count = 4;
     s_puts("DESKTOP: icons init 4 at (20,40) New Window, (20,140) Task Manager, (20,240) Clicker, (20,340) Notes\n");
 }
+// Notes icon: white notepad sheet with gray rules, teal top bar, silver spiral
+// binding, navy fountain pen, and a solid offset drop shadow. Painted with
+// solid primitives only (no alpha blending available); rounded paper corners
+// are faked by narrowing the top/bottom rows since the wallpaper behind varies.
+static void draw_notes_icon(int gx, int gy){
+    uint32_t paper = 0x00F9F9FB;   // off-white sheet
+    uint32_t rule = 0x00E2E8F0;    // faint blue-gray rules
+    uint32_t teal = 0x000EA5E9;    // top accent bar
+    uint32_t silver = 0x00C0C0C0;  // spiral rings + pen nib
+    uint32_t navy = 0x001E3A8A;    // pen barrel
+    uint32_t shadow = 0x002F3B4C;  // drop shadow
+    int px = gx + 6, py = gy + 3;  // 20x26 paper centered in the 32x32 canvas
+    // drop shadow behind everything (offset down-right, stays inside canvas)
+    fb_draw_rect(px+2, py+2, 20, 26, shadow);
+    // paper with rounded corners (narrowed top/bottom rows)
+    fb_draw_rect(px+2, py, 16, 1, paper);
+    fb_draw_rect(px+1, py+1, 18, 1, paper);
+    fb_draw_rect(px, py+2, 20, 22, paper);
+    fb_draw_rect(px+1, py+24, 18, 1, paper);
+    fb_draw_rect(px+2, py+25, 16, 1, paper);
+    // teal accent bar across the top
+    fb_draw_rect(px, py+3, 20, 2, teal);
+    // horizontal rules
+    for(int y = py+8; y <= py+22; y += 4) fb_draw_rect(px+3, y, 14, 1, rule);
+    // spiral binding: 4 silver rings straddling the top edge
+    for(int k=0;k<4;k++) gfx_draw_circle(px+3+k*5, py+1, 2, silver);
+    // pen barrel: 45-degree navy shaft (3 parallel lines for thickness)
+    gfx_draw_line(gx+4, gy+27, gx+22, gy+9, navy);
+    gfx_draw_line(gx+5, gy+27, gx+23, gy+9, navy);
+    gfx_draw_line(gx+4, gy+28, gx+22, gy+10, navy);
+    // pen nib: silver V converging to the tip
+    gfx_draw_line(gx+22, gy+9, gx+25, gy+6, silver);
+    gfx_draw_line(gx+23, gy+11, gx+25, gy+6, silver);
+    fb_draw_rect(gx+25, gy+6, 1, 1, silver);
+}
 void desktop_icons_draw(void){
     if(!fb_is_available()) return;
     for(int i=0;i<desktop_icon_count;i++){
@@ -336,7 +371,7 @@ void desktop_icons_draw(void){
         if(i==0){ fb_draw_rect(gx, gy, ICON_GLYPH, ICON_GLYPH, ic->color); gfx_draw_rect_outline(gx, gy, ICON_GLYPH, ICON_GLYPH, 0x00000000); gfx_draw_string(gx+12, gy+12, "+", 0x00FFFFFF); }
         else if(i==1){ gfx_draw_filled_circle(gx + ICON_GLYPH/2, gy + ICON_GLYPH/2, ICON_GLYPH/2, ic->color); gfx_draw_circle(gx + ICON_GLYPH/2, gy + ICON_GLYPH/2, ICON_GLYPH/2, 0x00000000); }
         else if(i==2){ fb_draw_rect(gx, gy, ICON_GLYPH, ICON_GLYPH, ic->color); gfx_draw_rect_outline(gx, gy, ICON_GLYPH, ICON_GLYPH, 0x00000000); gfx_draw_string(gx+8, gy+12, "C", 0x00FFFFFF); }
-        else { gfx_draw_filled_circle(gx + ICON_GLYPH/2, gy + ICON_GLYPH/2, ICON_GLYPH/2, ic->color); gfx_draw_circle(gx + ICON_GLYPH/2, gy + ICON_GLYPH/2, ICON_GLYPH/2, 0x00000000); gfx_draw_string(gx+12, gy+12, "N", 0x00FFFFFF); }
+        else { draw_notes_icon(gx, gy); }
         int len=0; while(ic->label[len] && len<32) len++;
         int tx = ix + (ICON_W - len*8)/2; int ty = iy + 4 + ICON_GLYPH + 6;
         if(ic->selected){ int bg_w = len*8 + 6; int bg_h = 10; int bg_x = tx - 3; int bg_y = ty - 1; fb_draw_rect(bg_x, bg_y, bg_w, bg_h, 0x000000FF); gfx_draw_string(tx, ty, ic->label, 0x00FFFFFF); }
