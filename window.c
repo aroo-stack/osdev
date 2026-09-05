@@ -100,23 +100,31 @@ static void s_put_cycles(uint64_t n);
 // Forward for cursor interaction - mouse.c provides cursor save/restore
 extern void window_redraw_with_cursor(void);
 
-static void window_draw_button(struct window *w){
-    if(!w->has_button) return;
+static void window_draw_one_button(struct window *w, int b){
     // Button absolute position = window x + button x, window y + button y
     // Button y is relative to window origin (0,0 = window top-left), so absolute already includes title bar offset if button placed below it
     // Conversion: ax = w->x + btn.x, ay = w->y + btn.y
-    int ax = w->x + w->btn.x;
-    int ay = w->y + w->btn.y;
-    uint32_t bg = w->btn.pressed ? 0x00999999 : 0x00CCCCCC; // pressed darker
+    int ax = w->x + w->btns[b].x;
+    int ay = w->y + w->btns[b].y;
+    uint32_t bg = w->btns[b].pressed ? 0x00999999 : 0x00CCCCCC; // pressed darker
     uint32_t border = 0x00000000;
     uint32_t fg = 0x00000000; // black text on light button
-    fb_draw_rect(ax, ay, w->btn.w, w->btn.h, bg);
-    gfx_draw_rect_outline(ax, ay, w->btn.w, w->btn.h, border);
+    fb_draw_rect(ax, ay, w->btns[b].w, w->btns[b].h, bg);
+    gfx_draw_rect_outline(ax, ay, w->btns[b].w, w->btns[b].h, border);
     // label centered
-    int len = 0; while(w->btn.label[len] && len < 32) len++;
-    int tx = ax + (w->btn.w - len*8)/2;
-    int ty = ay + (w->btn.h - 8)/2;
-    gfx_draw_string(tx, ty, w->btn.label, fg);
+    int len = 0; while(w->btns[b].label[len] && len < 32) len++;
+    int tx = ax + (w->btns[b].w - len*8)/2;
+    int ty = ay + (w->btns[b].h - 8)/2;
+    gfx_draw_string(tx, ty, w->btns[b].label, fg);
+}
+
+static void window_draw_button(struct window *w){
+    if(!w->has_button) return;
+    // Multi-button loop: Clicker has num_btns==1 so this renders pixel-identical
+    // to the old single-button path (same rect, colors, centering math).
+    int n = w->num_btns;
+    if(n > MAX_BTNS) n = MAX_BTNS;
+    for(int b=0;b<n;b++) window_draw_one_button(w, b);
 }
 
 static void window_draw_textbox(struct window *w){
@@ -223,6 +231,110 @@ int textbox_word_count(struct textbox *tb){
     return count;
 }
 
+// --- Calculator: purely reactive app, NO background task ---
+// Rationale: Clicker/Notes tasks exist to mutate state between interactions
+// (ticking counters) and must never touch fb directly (deferred-redraw rule).
+// Calculator state changes only inside the mouse button-up path (already GUI
+// context) and paints via g_needs_redraw. A task would burn PIT timeslices
+// redrawing nothing. Task Manager lists tids 1-2 only, so Calculator is
+// correctly absent there - it shows tasks, not windows.
+// Geometry (window 304x300): display at (20,30) 264x30; grid origin (20,76),
+// buttons 60x36, gap 8 -> col x=20+c*68, row y=76+r*44; grid bottom 244.
+static void calculator_init_window(int nid){
+    struct window *w = &windows[nid];
+    static const char *labels[4][4] = {{"7","8","9","/"},{"4","5","6","*"},{"1","2","3","-"},{"0","C","=","+"}};
+    w->x=500; w->y=140; w->w=304; w->h=300;
+    w_strcpy(w->title, "Calculator", 32);
+    w->bg_color=0x00E8E8E8; w->title_color=0x00226644; w->border_color=0x00000000;
+    w->visible=1; w->minimized=0; w->z=window_count;
+    w->has_textbox=0;
+    w->has_calc=1;
+    w->calc.display[0]='0'; w->calc.display[1]=0;
+    w->calc.acc=0; w->calc.op=0; w->calc.fresh=1; w->calc.err=0;
+    w->has_button=1; w->num_btns=0;
+    for(int r=0;r<4;r++) for(int c=0;c<4;c++){
+        int b = r*4+c;
+        w->btns[b].x = 20+c*68; w->btns[b].y = 76+r*44;
+        w->btns[b].w = 60; w->btns[b].h = 36;
+        w_strcpy(w->btns[b].label, labels[r][c], 32);
+        w->btns[b].pressed = 0; w->btns[b].clicks = 0;
+        w->num_btns++;
+    }
+    w->task_counter=0;
+}
+// Format int (with sign) into buf. Trace: 10 -> "10", -5 -> "-5", 0 -> "0".
+static void calc_itoa(int v, char *buf){
+    char tmp[12]; int t=0, neg=0;
+    if(v < 0){ neg=1; v = -v; } // INT_MIN edge ignored (out of scope)
+    if(v==0) tmp[t++]='0'; else while(v>0){ tmp[t++]=(char)('0'+v%10); v/=10; }
+    int p=0; if(neg) buf[p++]='-';
+    while(t--) buf[p++]=tmp[t];
+    buf[p]=0;
+}
+// Parse display (optional leading '-') -> int. Only called on digit-built
+// strings, never on "Error" (err flag guards those paths).
+static int calc_atoi_display(struct calc_state *c){
+    int i=0, neg=0, v=0;
+    if(c->display[0]=='-'){ neg=1; i=1; }
+    for(; c->display[i]; i++) v = v*10 + (c->display[i]-'0');
+    return neg ? -v : v;
+}
+// Returns 1 and sets *out, or 0 on divide-by-zero (caller latches err).
+static int calc_compute(int a, int op, int b, int *out){
+    if(op==1) *out = a+b;
+    else if(op==2) *out = a-b;
+    else if(op==3) *out = a*b;
+    else if(op==4){ if(b==0) return 0; *out = a/b; }
+    else *out = b;
+    return 1;
+}
+static void calc_reset(struct calc_state *c){
+    c->display[0]='0'; c->display[1]=0;
+    c->acc=0; c->op=0; c->fresh=1; c->err=0;
+}
+// Dispatch one Calculator button press (label-driven). Two-operand integer
+// only, no precedence. Traces:
+// "7+3=": 7->"7"; +: acc=7,op=+,fresh; 3->"3"; =: 7+3=10,op=0,fresh -> "10".
+// "5/0=": 5,/: acc=5,op=/; 0->"0"; =: div0 -> err, "Error" (no crash/garbage).
+// C: full reset -> "0".
+static void calculator_handle_button(struct window *w, int b){
+    struct calc_state *c = &w->calc;
+    char lab = w->btns[b].label[0];
+    if(lab=='C'){ calc_reset(c); }
+    else if(lab>='0' && lab<='9'){
+        if(c->err) calc_reset(c); // digit after Error starts over
+        if(c->fresh){ c->display[0]=lab; c->display[1]=0; c->fresh=0; }
+        else {
+            int len=0; while(c->display[len] && len<31) len++;
+            if(len < 10){ c->display[len]=lab; c->display[len+1]=0; } // cap entry width
+        }
+    }
+    else if(lab=='+'||lab=='-'||lab=='*'||lab=='/'){
+        if(c->err) return; // must C or digit first
+        int k = (lab=='+')?1:(lab=='-')?2:(lab=='*')?3:4;
+        int cur = calc_atoi_display(c);
+        if(!c->fresh && c->op!=0){
+            // chain: "2+3+" computes 2+3 first -> acc=5, then takes new op
+            int r;
+            if(!calc_compute(c->acc, c->op, cur, &r)){ c->err=1; w_strcpy(c->display, "Error", 32); return; }
+            c->acc = r; calc_itoa(r, c->display);
+        } else if(!c->fresh && c->op==0){
+            c->acc = cur;
+        }
+        // fresh with pending op (op pressed twice): just change op
+        c->op = k; c->fresh = 1;
+    }
+    else if(lab=='='){
+        if(c->err || c->op==0 || c->fresh) return; // nothing to compute
+        int r;
+        if(!calc_compute(c->acc, c->op, calc_atoi_display(c), &r)){ c->err=1; w_strcpy(c->display, "Error", 32); return; }
+        calc_itoa(r, c->display);
+        c->acc = r; c->op = 0; c->fresh = 1;
+    }
+    g_needs_redraw = 1;
+    s_puts("CALC: btn "); s_puts(w->btns[b].label); s_puts(" display "); s_puts(c->display); s_puts("\n");
+}
+
 static void window_draw_single(int idx){
     struct window *w = &windows[idx];
     if(!w->visible || w->minimized) return;
@@ -255,6 +367,15 @@ static void window_draw_single(int idx){
         // Session-persistence indicator: text is snapshotted on every close
         // and restored on reopen, until reboot (BSS buffer, no disk).
         gfx_draw_string(wx + 130, wy, "autosaved (session)", 0x00000000);
+    }
+    // Calculator display: white box at window-relative (20,30) 264x30,
+    // right-aligned text ("0", "10", "-5", "Error").
+    if(w->has_calc){
+        int dx = w->x + 20, dy = w->y + 30, dw = 264, dh = 30;
+        fb_draw_rect(dx, dy, dw, dh, 0x00FFFFFF);
+        gfx_draw_rect_outline(dx, dy, dw, dh, 0x00000000);
+        int dlen = 0; while(w->calc.display[dlen] && dlen < 32) dlen++;
+        gfx_draw_string(dx + dw - 4 - dlen*8, dy + (dh-8)/2, w->calc.display, 0x00000000);
     }
     if(w->title[0]=='T' && w->title[1]=='a' && w->title[5]=='M'){
         extern void pit_get_task_ticks(int *gui, int *a, int *b);
@@ -378,8 +499,9 @@ void desktop_icons_init(void){
     desktop_icons[1].x = 20; desktop_icons[1].y = 140; w_strcpy(desktop_icons[1].label, "Task Manager", 32); desktop_icons[1].color = 0x0030A030; desktop_icons[1].selected = 0;
     desktop_icons[2].x = 20; desktop_icons[2].y = 240; w_strcpy(desktop_icons[2].label, "Clicker", 32); desktop_icons[2].color = 0x00336699; desktop_icons[2].selected = 0;
     desktop_icons[3].x = 20; desktop_icons[3].y = 340; w_strcpy(desktop_icons[3].label, "Notes", 32); desktop_icons[3].color = 0x00993333; desktop_icons[3].selected = 0;
-    desktop_icon_count = 4;
-    s_puts("DESKTOP: icons init 4 at (20,40) New Window, (20,140) Task Manager, (20,240) Clicker, (20,340) Notes\n");
+    desktop_icons[4].x = 20; desktop_icons[4].y = 440; w_strcpy(desktop_icons[4].label, "Calculator", 32); desktop_icons[4].color = 0x00226644; desktop_icons[4].selected = 0;
+    desktop_icon_count = 5;
+    s_puts("DESKTOP: icons init 5 at (20,40) New Window, (20,140) Task Manager, (20,240) Clicker, (20,340) Notes, (20,440) Calculator\n");
 }
 // Notes icon: white notepad sheet with gray rules, teal top bar, silver spiral
 // binding, navy fountain pen, and a solid offset drop shadow. Painted with
@@ -515,6 +637,29 @@ static void draw_taskmgr_icon(int gx, int gy){
     gfx_draw_filled_circle(tx+12, ty+6, 2, graph);
     fb_draw_rect(tx+12, ty+6, 1, 1, 0x00FFFFFF);
 }
+// Calculator icon: slate calculator body with white display strip and a 3x3
+// grid of mint key dots, plus solid offset drop shadow. Same 32x32 canvas
+// and solid-primitive style as the Notes/Clicker glyphs.
+static void draw_calc_icon(int gx, int gy){
+    uint32_t body = 0x002F3B4C;     // slate body
+    uint32_t edge = 0x00000000;     // outline
+    uint32_t disp = 0x00F1F5F9;     // display strip
+    uint32_t mint = 0x006EE7B7;     // keys
+    uint32_t eqkey = 0x00F59E0B;    // amber = key accent
+    uint32_t shadow = 0x00141824;   // drop shadow
+    int bx = gx + 6, by = gy + 3;   // 20x26 body centered in canvas
+    fb_draw_rect(bx+2, by+2, 20, 26, shadow);
+    fb_draw_rect(bx, by, 20, 26, body);
+    gfx_draw_rect_outline(bx, by, 20, 26, edge);
+    // display strip
+    fb_draw_rect(bx+3, by+3, 14, 5, disp);
+    // 3x3 key grid (last key amber)
+    for(int r=0;r<3;r++) for(int c=0;c<3;c++){
+        int kx = bx+3+c*5, ky = by+11+r*5;
+        uint32_t kc = (r==2 && c==2) ? eqkey : mint;
+        fb_draw_rect(kx, ky, 3, 3, kc);
+    }
+}
 void desktop_icons_draw(void){
     if(!fb_is_available()) return;
     for(int i=0;i<desktop_icon_count;i++){
@@ -524,7 +669,8 @@ void desktop_icons_draw(void){
         if(i==0){ fb_draw_rect(gx, gy, ICON_GLYPH, ICON_GLYPH, ic->color); gfx_draw_rect_outline(gx, gy, ICON_GLYPH, ICON_GLYPH, 0x00000000); gfx_draw_string(gx+12, gy+12, "+", 0x00FFFFFF); }
         else if(i==1){ draw_taskmgr_icon(gx, gy); }
         else if(i==2){ draw_clicker_icon(gx, gy); }
-        else { draw_notes_icon(gx, gy); }
+        else if(i==3){ draw_notes_icon(gx, gy); }
+        else if(i==4){ draw_calc_icon(gx, gy); }
         int len=0; while(ic->label[len] && len<32) len++;
         int tx = ix + (ICON_W - len*8)/2; int ty = iy + 4 + ICON_GLYPH + 6;
         if(ic->selected){ int bg_w = len*8 + 6; int bg_h = 10; int bg_x = tx - 3; int bg_y = ty - 1; fb_draw_rect(bg_x, bg_y, bg_w, bg_h, 0x000000FF); gfx_draw_string(tx, ty, ic->label, 0x00FFFFFF); }
@@ -548,7 +694,7 @@ int desktop_icon_handle_click(int x, int y){
         s_puts("DESKTOP: double-click icon "); s_put_dec(idx); s_puts("\n");
         for(int i=0;i<desktop_icon_count;i++) desktop_icons[i].selected = (i==idx); selected_icon = idx; last_click_icon = -1; last_click_tick = -1000;
         if(idx==0){ s_puts("DESKTOP: action New Window\n"); window_create_new(); }
-        else if(idx==1){ int found=-1; for(int i=0;i<window_count;i++) if(icon_streq(windows[i].title, "Task Manager")) { found=i; break; } if(found!=-1){ s_puts("DESKTOP: action Task Manager bring to front\n"); if(windows[found].minimized){ windows[found].minimized=0; s_puts("DESKTOP: unminimize Task Manager\n"); } window_bring_to_front(found); } else { s_puts("DESKTOP: action Task Manager create (was closed)\n"); if(window_count < MAX_WINDOWS){ int nid = window_count; windows[nid].x=600; windows[nid].y=100; windows[nid].w=300; windows[nid].h=200; w_strcpy(windows[nid].title, "Task Manager", 32); windows[nid].bg_color=0x00F0F0F0; windows[nid].title_color=0x00333333; windows[nid].border_color=0x00000000; windows[nid].visible=1; windows[nid].minimized=0; windows[nid].z=window_count; windows[nid].has_button=0; windows[nid].has_textbox=0; windows[nid].task_counter=0; z_order[window_count]=nid; window_count++; for(int i=0;i<window_count;i++) windows[z_order[i]].z=i; s_puts("DESKTOP: created Task Manager\n"); g_needs_redraw=1; } else s_puts("DESKTOP: cannot create Task Manager - at max\n"); } }
+        else if(idx==1){ int found=-1; for(int i=0;i<window_count;i++) if(icon_streq(windows[i].title, "Task Manager")) { found=i; break; } if(found!=-1){ s_puts("DESKTOP: action Task Manager bring to front\n"); if(windows[found].minimized){ windows[found].minimized=0; s_puts("DESKTOP: unminimize Task Manager\n"); } window_bring_to_front(found); } else { s_puts("DESKTOP: action Task Manager create (was closed)\n"); if(window_count < MAX_WINDOWS){ int nid = window_count; windows[nid].x=600; windows[nid].y=100; windows[nid].w=300; windows[nid].h=200; w_strcpy(windows[nid].title, "Task Manager", 32); windows[nid].bg_color=0x00F0F0F0; windows[nid].title_color=0x00333333; windows[nid].border_color=0x00000000; windows[nid].visible=1; windows[nid].minimized=0; windows[nid].z=window_count; windows[nid].has_button=0; windows[nid].num_btns=0; windows[nid].has_textbox=0; windows[nid].has_calc=0; windows[nid].task_counter=0; z_order[window_count]=nid; window_count++; for(int i=0;i<window_count;i++) windows[z_order[i]].z=i; s_puts("DESKTOP: created Task Manager\n"); g_needs_redraw=1; } else s_puts("DESKTOP: cannot create Task Manager - at max\n"); } }
         else if(idx==2){ // Clicker
             int found=-1; for(int i=0;i<window_count;i++) if(icon_streq(windows[i].title, "Clicker")) { found=i; break; }
             if(found!=-1){ s_puts("DESKTOP: action Clicker bring to front\n"); if(windows[found].minimized){ windows[found].minimized=0; } window_bring_to_front(found); }
@@ -568,9 +714,9 @@ int desktop_icon_handle_click(int x, int y){
                     windows[nid].x=100; windows[nid].y=100; windows[nid].w=400; windows[nid].h=300;
                     w_strcpy(windows[nid].title, "Clicker", 32);
                     windows[nid].bg_color=0x00E0E0E0; windows[nid].title_color=0x00336699; windows[nid].border_color=0x00000000;
-                    windows[nid].visible=1; windows[nid].minimized=0; windows[nid].z=window_count; windows[nid].has_button=1;
-                    windows[nid].btn.x=20; windows[nid].btn.y=40; windows[nid].btn.w=120; windows[nid].btn.h=30; w_strcpy(windows[nid].btn.label, "Click Me", 32); windows[nid].btn.pressed=0; windows[nid].btn.clicks=0;
-                    windows[nid].has_textbox=0; windows[nid].task_counter=0;
+                    windows[nid].visible=1; windows[nid].minimized=0; windows[nid].z=window_count; windows[nid].has_button=1; windows[nid].num_btns=1;
+                    windows[nid].btns[0].x=20; windows[nid].btns[0].y=40; windows[nid].btns[0].w=120; windows[nid].btns[0].h=30; w_strcpy(windows[nid].btns[0].label, "Click Me", 32); windows[nid].btns[0].pressed=0; windows[nid].btns[0].clicks=0;
+                    windows[nid].has_textbox=0; windows[nid].has_calc=0; windows[nid].task_counter=0;
                     z_order[window_count]=nid; window_count++; for(int i=0;i<window_count;i++) windows[z_order[i]].z=i;
                     s_puts("DESKTOP: created Clicker\n"); g_needs_redraw=1;
                 } else s_puts("DESKTOP: cannot create Clicker - at max\n");
@@ -593,12 +739,25 @@ int desktop_icon_handle_click(int x, int y){
                     windows[nid].x=250; windows[nid].y=180; windows[nid].w=400; windows[nid].h=300;
                     w_strcpy(windows[nid].title, "Notes", 32);
                     windows[nid].bg_color=0x00D0D0FF; windows[nid].title_color=0x00993333; windows[nid].border_color=0x00000000;
-                    windows[nid].visible=1; windows[nid].minimized=0; windows[nid].z=window_count; windows[nid].has_button=0; windows[nid].has_textbox=1;
+                    windows[nid].visible=1; windows[nid].minimized=0; windows[nid].z=window_count; windows[nid].has_button=0; windows[nid].num_btns=0; windows[nid].has_textbox=1; windows[nid].has_calc=0;
                     windows[nid].tbox.x=20; windows[nid].tbox.y=40; windows[nid].tbox.w=360; windows[nid].tbox.h=60; windows[nid].tbox.max_len=512; notes_restore_to(nid); // session text (empty on fresh boot)
                     windows[nid].task_counter=0;
                     z_order[window_count]=nid; window_count++; for(int i=0;i<window_count;i++) windows[z_order[i]].z=i;
                     s_puts("DESKTOP: created Notes\n"); g_needs_redraw=1;
                 } else s_puts("DESKTOP: cannot create Notes - at max\n");
+            }
+        }
+        else if(idx==4){ // Calculator - window only, NO background task (purely reactive)
+            int found=-1; for(int i=0;i<window_count;i++) if(icon_streq(windows[i].title, "Calculator")) { found=i; break; }
+            if(found!=-1){ s_puts("DESKTOP: action Calculator bring to front\n"); if(windows[found].minimized){ windows[found].minimized=0; } window_bring_to_front(found); }
+            else {
+                s_puts("DESKTOP: action Calculator create (was closed)\n");
+                if(window_count < MAX_WINDOWS){
+                    int nid = window_count;
+                    calculator_init_window(nid);
+                    z_order[window_count]=nid; window_count++; for(int i=0;i<window_count;i++) windows[z_order[i]].z=i;
+                    s_puts("DESKTOP: created Calculator\n"); g_needs_redraw=1;
+                } else s_puts("DESKTOP: cannot create Calculator - at max\n");
             }
         }
         g_needs_redraw=1; return 1;
@@ -625,10 +784,12 @@ void window_manager_init(void){
     windows[0].visible = 1;
     windows[0].z = 0;
     windows[0].has_button = 1;
-    windows[0].btn.x = 20; windows[0].btn.y = 40; windows[0].btn.w = 120; windows[0].btn.h = 30;
-    w_strcpy(windows[0].btn.label, "Click Me", 32);
-    windows[0].btn.pressed = 0;
-    windows[0].btn.clicks = 0;
+    windows[0].num_btns = 1; // single button at index 0 (was struct button btn)
+    windows[0].has_textbox = 0; windows[0].has_calc = 0;
+    windows[0].btns[0].x = 20; windows[0].btns[0].y = 40; windows[0].btns[0].w = 120; windows[0].btns[0].h = 30;
+    w_strcpy(windows[0].btns[0].label, "Click Me", 32);
+    windows[0].btns[0].pressed = 0;
+    windows[0].btns[0].clicks = 0;
 
     windows[1].x = 250; windows[1].y = 180; windows[1].w = 400; windows[1].h = 300;
     w_strcpy(windows[1].title, "Notes", 32);
@@ -638,6 +799,8 @@ void window_manager_init(void){
     windows[1].visible = 1;
     windows[1].z = 1;
     windows[1].has_button = 0;
+    windows[1].num_btns = 0;
+    windows[1].has_calc = 0;
     windows[1].has_textbox = 1;
     windows[1].tbox.x = 20; windows[1].tbox.y = 40; windows[1].tbox.w = 360; windows[1].tbox.h = 60; // taller to show 5 lines (was 30 for 2 lines)
     windows[1].tbox.max_len = 512;
@@ -650,16 +813,16 @@ void window_manager_init(void){
     windows[1].task_counter = 0;
 
     windows[2].x = 0; windows[2].y = 0; windows[2].w = 0; windows[2].h = 0;
-    windows[2].visible = 0; windows[2].minimized = 0; windows[2].task_counter = 0;
+    windows[2].visible = 0; windows[2].minimized = 0; windows[2].has_button = 0; windows[2].num_btns = 0; windows[2].has_textbox = 0; windows[2].has_calc = 0; windows[2].task_counter = 0;
     windows[3].x = 0; windows[3].y = 0; windows[3].w = 0; windows[3].h = 0;
-    windows[3].visible = 0; windows[3].minimized = 0; windows[3].task_counter = 0;
+    windows[3].visible = 0; windows[3].minimized = 0; windows[3].has_button = 0; windows[3].num_btns = 0; windows[3].has_textbox = 0; windows[3].has_calc = 0; windows[3].task_counter = 0;
 
     window_count = 2;
     // z_order 0..1 back->front corresponds to windows index order initially
     for(int i=0;i<window_count;i++) z_order[i]=i;
 
     desktop_icons_init();
-    s_puts("WM: created 2 windows (Clicker button, Notes textbox) + 4 desktop icons\n");
+    s_puts("WM: created 2 windows (Clicker button, Notes textbox) + 5 desktop icons\n");
     // Build wallpaper cache once (draws Bliss then snapshots, measures flat vs Bliss vs blit)
     wallpaper_cache_build_once();
     window_manager_draw_all();
@@ -757,7 +920,9 @@ int window_create_new(void){
     windows[idx].minimized = 0;
     windows[idx].z = window_count;
     windows[idx].has_button = 0;
+    windows[idx].num_btns = 0;
     windows[idx].has_textbox = 0;
+    windows[idx].has_calc = 0;
     windows[idx].task_counter = 0;
     z_order[window_count] = idx;
     window_count++;
@@ -1128,9 +1293,17 @@ void window_update_resize(int x, int y){
     int min_w = WIN_MIN_W;
     int min_h = WIN_MIN_H;
     if(w->has_button){
-        int need_w = w->btn.x + w->btn.w + 10;
+        // Bounding box over all buttons (Clicker: single button, same numbers as before)
+        int need_w = min_w, need_h = min_h;
+        int n = w->num_btns;
+        if(n > MAX_BTNS) n = MAX_BTNS;
+        for(int b=0;b<n;b++){
+            int bw = w->btns[b].x + w->btns[b].w + 10;
+            if(bw > need_w) need_w = bw;
+            int bh = w->btns[b].y + w->btns[b].h + 10;
+            if(bh > need_h) need_h = bh;
+        }
         if(need_w > min_w) min_w = need_w;
-        int need_h = w->btn.y + w->btn.h + 10;
         if(need_h > min_h) min_h = need_h;
     }
     if(w->has_textbox){
@@ -1245,9 +1418,11 @@ void window_close(int idx){
         s_put_dec(notes_saved_len);
         s_puts("\n");
     }
-    // If closed window had pressed button, clear
-    if(windows[idx].has_button && windows[idx].btn.pressed){
-        windows[idx].btn.pressed=0;
+    // If closed window had pressed button(s), clear
+    if(windows[idx].has_button){
+        int n = windows[idx].num_btns;
+        if(n > MAX_BTNS) n = MAX_BTNS;
+        for(int b=0;b<n;b++) windows[idx].btns[b].pressed=0;
     }
     // Remove from z_order: find pos of idx in z_order, remove it, and adjust indices > idx
     int pos=-1;
@@ -1394,20 +1569,28 @@ void window_end_drag(void){
     drag_win = -1;
 }
 
-// --- Phase 12: button ---
+// --- Phase 12: button (multi-button since Calculator) ---
+// Returns button index or -1. Loops all buttons; Clicker (num_btns==1)
+// behaves exactly as the old single-button test.
 static int button_hit_test(int win_idx, int x, int y){
-    if(win_idx <0 || win_idx >= window_count) return 0;
+    if(win_idx <0 || win_idx >= window_count) return -1;
     struct window *w = &windows[win_idx];
-    if(!w->has_button) return 0;
-    int ax = w->x + w->btn.x;
-    int ay = w->y + w->btn.y;
-    return (x >= ax && x < ax + w->btn.w && y >= ay && y < ay + w->btn.h);
+    if(!w->has_button) return -1;
+    int n = w->num_btns;
+    if(n > MAX_BTNS) n = MAX_BTNS;
+    for(int b=0;b<n;b++){
+        int ax = w->x + w->btns[b].x;
+        int ay = w->y + w->btns[b].y;
+        if(x >= ax && x < ax + w->btns[b].w && y >= ay && y < ay + w->btns[b].h) return b;
+    }
+    return -1;
 }
 
 int window_handle_button_down(int x, int y){
     int idx = window_find_at(x,y);
     if(idx==-1) return 0;
-    if(!button_hit_test(idx,x,y)) return 0;
+    int b = button_hit_test(idx,x,y);
+    if(b < 0) return 0;
     struct window *w = &windows[idx];
     // Bring window to front if not already - defer redraw
     int pos=-1;
@@ -1420,35 +1603,48 @@ int window_handle_button_down(int x, int y){
         for(int i=0;i<window_count;i++){ s_put_dec(z_order[i]); if(i<window_count-1) s_putc(','); }
         s_puts("]\n");
     }
-    w->btn.pressed = 1;
+    w->btns[b].pressed = 1;
     g_needs_redraw = 1;
-    s_puts("BTN: down Window "); s_put_dec(idx+1); s_puts(" pressed\n");
+    s_puts("BTN: down Window "); s_put_dec(idx+1); s_puts(" btn "); s_put_dec(b); s_puts(" pressed\n");
     return 1;
 }
 
 
 int window_handle_button_up(int x, int y){
-    int pressed_idx = -1;
-    for(int i=0;i<window_count;i++) if(windows[i].has_button && windows[i].btn.pressed) pressed_idx = i;
+    // Find the one pressed button across all windows (down guarantees uniqueness).
+    int pressed_idx = -1, pressed_b = -1;
+    for(int i=0;i<window_count && pressed_idx==-1;i++){
+        if(!windows[i].has_button) continue;
+        int n = windows[i].num_btns;
+        if(n > MAX_BTNS) n = MAX_BTNS;
+        for(int b=0;b<n;b++) if(windows[i].btns[b].pressed){ pressed_idx = i; pressed_b = b; break; }
+    }
     if(pressed_idx==-1) return 0;
     struct window *w = &windows[pressed_idx];
-    int ax = w->x + w->btn.x;
-    int ay = w->y + w->btn.y;
-    int inside = (x >= ax && x < ax + w->btn.w && y >= ay && y < ay + w->btn.h);
-    w->btn.pressed = 0;
+    int ax = w->x + w->btns[pressed_b].x;
+    int ay = w->y + w->btns[pressed_b].y;
+    int inside = (x >= ax && x < ax + w->btns[pressed_b].w && y >= ay && y < ay + w->btns[pressed_b].h);
+    w->btns[pressed_b].pressed = 0;
     if(inside){
-        w->btn.clicks++;
+        // Calculator dispatches to calc logic; every other button window keeps
+        // the legacy Clicker behavior on the clicked button (Clicker: btns[0],
+        // label "Clicked: N" - pixel- and serial-identical to before).
+        if(w->has_calc){
+            calculator_handle_button(w, pressed_b);
+        } else {
+            w->btns[pressed_b].clicks++;
         char buf[32];
         const char *prefix = "Clicked: ";
         int p=0;
         for(int i=0; prefix[i] && p<31; i++) buf[p++]=prefix[i];
-        char num[12]; int n=w->btn.clicks; int len=0;
+        char num[12]; int n=w->btns[pressed_b].clicks; int len=0;
         if(n==0) num[len++]='0';
         else { char tmp[12]; int t=0; while(n){ tmp[t++]='0'+n%10; n/=10; } while(t--) num[len++]=tmp[t]; }
         for(int i=0;i<len && p<31; i++) buf[p++]=num[i];
         buf[p]=0;
-        w_strcpy(w->btn.label, buf, 32);
-        s_puts("BTN: click Window "); s_put_dec(pressed_idx+1); s_puts(" count "); s_put_dec(w->btn.clicks); s_puts(" label "); s_puts(buf); s_puts("\n");
+        w_strcpy(w->btns[pressed_b].label, buf, 32);
+        s_puts("BTN: click Window "); s_put_dec(pressed_idx+1); s_puts(" count "); s_put_dec(w->btns[pressed_b].clicks); s_puts(" label "); s_puts(buf); s_puts("\n");
+        }
     } else {
         s_puts("BTN: release outside Window "); s_put_dec(pressed_idx+1); s_puts("\n");
     }

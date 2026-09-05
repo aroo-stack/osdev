@@ -23,6 +23,15 @@ struct button {
     int pressed;
     int clicks;
 };
+#define MAX_BTNS 20 // Calculator uses 16 (0-9, +, -, *, /, =, C); Clicker uses 1
+
+struct calc_state {
+    char display[32]; // shown in display box ("0", "10", "-5", "Error")
+    int acc;   // first operand / running result
+    int op;    // 0 none, 1 +, 2 -, 3 *, 4 /
+    int fresh; // 1 = next digit starts a new entry (after op/= /C)
+    int err;   // 1 = divide-by-zero latched, display shows "Error"
+};
 
 struct textbox {
     int x, y, w, h; // relative to parent window origin
@@ -43,10 +52,13 @@ struct window {
     int visible;
     int minimized; // 1 = not drawn on desktop, but taskbar tab still shows
     int z; // 0 = back, higher = front
-    struct button btn;
-    int has_button;
+    struct button btns[MAX_BTNS]; // buttons[0] is Clicker's single button (was struct button btn)
+    int num_btns; // 0 = none; Clicker 1, Calculator 16
+    int has_button; // == (num_btns > 0), kept as the existing guard
     struct textbox tbox;
     int has_textbox;
+    struct calc_state calc; // meaningful only when has_calc == 1
+    int has_calc; // 1 = Calculator app window (no background task, purely reactive)
     volatile int task_counter; // owned by Clicker/Notes tasks, drawn by GUI task - single-word atomic
 };
 extern struct window windows[];

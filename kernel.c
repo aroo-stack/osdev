@@ -304,7 +304,7 @@ void kernel_main(uint32_t magic, uint32_t mbi_addr) {
     // Phase 10: Window manager (before mouse cursor, so windows under cursor)
     serial_puts("WM: init...\n");
     window_manager_init();
-    serial_puts("WM: ready - 3 overlapping windows, click to focus\n");
+    serial_puts("WM: ready - 2 overlapping windows, click to focus\n");
 
     // Phase 9: PS/2 mouse + cursor (after windows, so cursor on top)
     serial_puts("MOUSE: init (IRQ12 vector 44)...\n");
