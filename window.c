@@ -251,7 +251,7 @@ static void calculator_init_window(int nid){
     w->visible=1; w->minimized=0; w->z=window_count;
     w->has_textbox=0;
     w->has_calc=1;
-    w->calc.display[0]='0'; w->calc.display[1]=0;
+    w->calc.display[0]='0'; w->calc.display[1]='.'; w->calc.display[2]='0'; w->calc.display[3]='0'; w->calc.display[4]=0; // "0.00"
     w->calc.acc=0; w->calc.op=0; w->calc.fresh=1; w->calc.err=0;
     w->has_button=1; w->num_btns=0;
     for(int r=0;r<4;r++) for(int c=0;c<4;c++){
@@ -264,41 +264,72 @@ static void calculator_init_window(int nid){
     }
     w->task_counter=0;
 }
-// Format int (with sign) into buf. Trace: 10 -> "10", -5 -> "-5", 0 -> "0".
-static void calc_itoa(int v, char *buf){
-    char tmp[12]; int t=0, neg=0;
-    if(v < 0){ neg=1; v = -v; } // INT_MIN edge ignored (out of scope)
-    if(v==0) tmp[t++]='0'; else while(v>0){ tmp[t++]=(char)('0'+v%10); v/=10; }
+// FIXED-POINT model (no FPU anywhere: no CR0.EM handling, no FNINIT - out of
+// scope). All values stored as integers scaled by 100 (2 decimals): "1.55" is
+// the int 155, "10.00" is 1000. Arithmetic is plain integer math; the decimal
+// point is inserted only when FORMATTING for display.
+// Entry model: whole-number entry ONLY (no decimal-point button - the 4x4 grid
+// is full at 16/16). Typing builds an integer string; it is scaled x100 when an
+// operator reads it. Decimals are PRODUCED by division (and persist through
+// chains via parse-back of the formatted display). E.g. 14/9 -> "1.55".
+// Range note: scaled values must fit int32; entry capped at 7 digits
+// (9999999 -> 999999900 scaled, fits). Operands beyond ~214,748.36 can overflow
+// the (a*100) division step; huge products can wrap - same overflow character
+// as the old integer code, documented, out of scope.
+// Format scaled int -> "D+.DD" always with 2 decimals (consistent, unambiguous
+// about precision; no trim logic). Traces: 155 -> "1.55", 1000 -> "10.00",
+// 0 -> "0.00", -55 -> "-0.55", -200 -> "-2.00".
+static void calc_format_scaled(int v, char *buf){
+    int neg=0; if(v < 0){ neg=1; v = -v; } // INT_MIN edge ignored (see range note)
+    int ip = v/100, fp = v%100;
+    char tmp[12]; int t=0;
+    if(ip==0) tmp[t++]='0'; else while(ip>0){ tmp[t++]=(char)('0'+ip%10); ip/=10; }
     int p=0; if(neg) buf[p++]='-';
     while(t--) buf[p++]=tmp[t];
+    buf[p++]='.';
+    buf[p++]=(char)('0'+fp/10); buf[p++]=(char)('0'+fp%10);
     buf[p]=0;
 }
-// Parse display (optional leading '-') -> int. Only called on digit-built
-// strings, never on "Error" (err flag guards those paths).
-static int calc_atoi_display(struct calc_state *c){
-    int i=0, neg=0, v=0;
-    if(c->display[0]=='-'){ neg=1; i=1; }
-    for(; c->display[i]; i++) v = v*10 + (c->display[i]-'0');
+// Parse display -> scaled int. Handles optional '-', optional '.' with up to 2
+// fractional digits (pads short: "1.5" -> 150). Only called on numeric displays,
+// never on "Error" (err flag guards those paths). Traces: "14" -> 1400,
+// "1.55" -> 155, "10.00" -> 1000, "-2.00" -> -200.
+static int calc_parse_scaled(struct calc_state *c){
+    char *s = c->display; int i=0, neg=0, v=0;
+    if(s[0]=='-'){ neg=1; i=1; }
+    while(s[i] && s[i]!='.'){ v = v*10 + (s[i]-'0'); i++; }
+    v *= 100;
+    if(s[i]=='.'){ i++; int f=0, d=0;
+        while(s[i] && d<2){ f = f*10 + (s[i]-'0'); i++; d++; }
+        while(d<2){ f*=10; d++; }
+        v += f;
+    }
     return neg ? -v : v;
 }
 // Returns 1 and sets *out, or 0 on divide-by-zero (caller latches err).
+// Add/sub: both operands x100, direct op stays x100 - no special handling.
+// (700+300=1000 -> "10.00".)
+// Mul: raw product is x10000, so /100 returns to x100.
+// Trace 2.50*3.00: 250*300=75000, /100=750 -> "7.50" (not 75.00, not 0.075).
+// Div: (a*100)/b lands back at x100 with 2 decimals instead of truncating.
+// Trace 14/9: a=1400, b=900 -> 140000/900 = 155 (truncated, not rounded) -> "1.55".
 static int calc_compute(int a, int op, int b, int *out){
     if(op==1) *out = a+b;
     else if(op==2) *out = a-b;
-    else if(op==3) *out = a*b;
-    else if(op==4){ if(b==0) return 0; *out = a/b; }
+    else if(op==3) *out = (a*b)/100;
+    else if(op==4){ if(b==0) return 0; *out = (a*100)/b; }
     else *out = b;
     return 1;
 }
 static void calc_reset(struct calc_state *c){
-    c->display[0]='0'; c->display[1]=0;
+    c->display[0]='0'; c->display[1]='.'; c->display[2]='0'; c->display[3]='0'; c->display[4]=0; // "0.00"
     c->acc=0; c->op=0; c->fresh=1; c->err=0;
 }
-// Dispatch one Calculator button press (label-driven). Two-operand integer
-// only, no precedence. Traces:
-// "7+3=": 7->"7"; +: acc=7,op=+,fresh; 3->"3"; =: 7+3=10,op=0,fresh -> "10".
-// "5/0=": 5,/: acc=5,op=/; 0->"0"; =: div0 -> err, "Error" (no crash/garbage).
-// C: full reset -> "0".
+// Dispatch one Calculator button press (label-driven). Fixed-point two-operand,
+// no precedence. Traces:
+// "7+3=": 7->"7"; +: acc=700,op=+,fresh; 3->"3"; =: 700+300=1000 -> "10.00".
+// "14/9=": acc=1400,op=/; 9; =: 140000/900=155 (truncate) -> "1.55".
+// "5/0=": div0 -> err, "Error" (no crash/garbage). C: full reset -> "0.00".
 static void calculator_handle_button(struct window *w, int b){
     struct calc_state *c = &w->calc;
     char lab = w->btns[b].label[0];
@@ -307,19 +338,25 @@ static void calculator_handle_button(struct window *w, int b){
         if(c->err) calc_reset(c); // digit after Error starts over
         if(c->fresh){ c->display[0]=lab; c->display[1]=0; c->fresh=0; }
         else {
-            int len=0; while(c->display[len] && len<31) len++;
-            if(len < 10){ c->display[len]=lab; c->display[len+1]=0; } // cap entry width
+            // Entry is whole digits only; a '.' here means a result is showing
+            // (shouldn't happen with fresh=0) - restart entry rather than corrupt.
+            int hasdot=0; { int k=0; while(c->display[k]){ if(c->display[k]=='.') hasdot=1; k++; } }
+            if(hasdot){ c->display[0]=lab; c->display[1]=0; }
+            else {
+                int len=0; while(c->display[len] && len<31) len++;
+                if(len < 7){ c->display[len]=lab; c->display[len+1]=0; } // 7-digit cap: scaled fits int32
+            }
         }
     }
     else if(lab=='+'||lab=='-'||lab=='*'||lab=='/'){
         if(c->err) return; // must C or digit first
         int k = (lab=='+')?1:(lab=='-')?2:(lab=='*')?3:4;
-        int cur = calc_atoi_display(c);
+        int cur = calc_parse_scaled(c);
         if(!c->fresh && c->op!=0){
-            // chain: "2+3+" computes 2+3 first -> acc=5, then takes new op
+            // chain: "2+3+" computes 2+3 first -> acc=500, display "5.00", then new op
             int r;
             if(!calc_compute(c->acc, c->op, cur, &r)){ c->err=1; w_strcpy(c->display, "Error", 32); return; }
-            c->acc = r; calc_itoa(r, c->display);
+            c->acc = r; calc_format_scaled(r, c->display);
         } else if(!c->fresh && c->op==0){
             c->acc = cur;
         }
@@ -329,8 +366,8 @@ static void calculator_handle_button(struct window *w, int b){
     else if(lab=='='){
         if(c->err || c->op==0 || c->fresh) return; // nothing to compute
         int r;
-        if(!calc_compute(c->acc, c->op, calc_atoi_display(c), &r)){ c->err=1; w_strcpy(c->display, "Error", 32); return; }
-        calc_itoa(r, c->display);
+        if(!calc_compute(c->acc, c->op, calc_parse_scaled(c), &r)){ c->err=1; w_strcpy(c->display, "Error", 32); return; }
+        calc_format_scaled(r, c->display);
         c->acc = r; c->op = 0; c->fresh = 1;
     }
     g_needs_redraw = 1;
