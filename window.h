@@ -69,6 +69,15 @@ extern int z_order[];
 // read once at boot; PIT ticks advance it from there. -1/unset -> 00:00:00.
 void clock_set_base_seconds(int s);
 int clock_current_seconds(void); // (base + pit_get_ticks()/100) % 86400
+// timezone display offset (hours, fixed presets, no DST logic, no tz database):
+// applied ONLY at display formatting; UTC tracking (RTC seed + PIT) untouched.
+// Future Settings app contract: read tz_offset_hours, write via setter/cycle.
+#define TIMEZONE_PRESET_COUNT 4
+extern int tz_offset_hours;
+void timezone_set_offset(int hours); // validated to -12..+14, triggers redraw
+void timezone_cycle(void); // step through {UTC, UTC+10, UTC-5, UTC+9}
+const char *timezone_label(void); // "UTC", "UTC+10", "UTC-5", ... (static buf)
+int clock_apply_tz(int utc_sec, int off_hours); // pure wrap math, testable
 // wallpaper presets - session global for a future Settings app:
 // read via wallpaper_preset, change ONLY via wallpaper_set_preset/cycle
 // (setter validates + rebuilds cache + redraws). 0=Day 1=Sunset 2=Night.

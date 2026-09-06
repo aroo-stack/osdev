@@ -569,6 +569,47 @@ int clock_current_seconds(void){
     // % 86400 wraps past midnight; int % is a single DIV, no libgcc needed.
     return (clock_base_sec + pit_get_ticks() / 100) % 86400;
 }
+// Timezone display offset: fixed presets, no DST logic, no tz database.
+// Presets: UTC+0, +10 Sydney (std; +11 DST not modeled), -5 US Eastern (std),
+// +9 Tokyo (no DST). Labels generic ("UTC+10") by design.
+// Wraparound traces (mod-then-fix, since C % keeps sign of dividend):
+// UTC 23:30 (84600) +10h: (84600+36000)=120600 % 86400 = 34200 -> 09:30 next day.
+// UTC 02:00 (7200) -5h: (7200-18000)=-10800 % 86400 = -10800 -> +86400 = 75600 -> 21:00.
+// UTC 00:00 +0 -> 0; 23:59:59 (86399) +1h -> 89999%86400=3599 -> 00:59:59.
+int tz_offset_hours = 0; // BSS zero = UTC at boot
+static const int tz_preset_offsets[TIMEZONE_PRESET_COUNT] = {0, 10, -5, 9};
+static int tz_preset_idx = 0;
+int clock_apply_tz(int utc_sec, int off_hours){
+    int local = (utc_sec + off_hours * 3600) % 86400;
+    if(local < 0) local += 86400;
+    return local;
+}
+void timezone_set_offset(int hours){
+    if(hours < -12 || hours > 14) return; // outside all real zones: ignore
+    tz_offset_hours = hours;
+    tz_preset_idx = 0;
+    for(int i=0;i<TIMEZONE_PRESET_COUNT;i++) if(tz_preset_offsets[i]==hours) tz_preset_idx = i;
+    s_puts("TZ: now "); s_puts(timezone_label()); s_puts("\n");
+    g_needs_redraw = 1;
+}
+void timezone_cycle(void){
+    tz_preset_idx = (tz_preset_idx + 1) % TIMEZONE_PRESET_COUNT;
+    timezone_set_offset(tz_preset_offsets[tz_preset_idx]);
+}
+const char *timezone_label(void){
+    // "UTC", "UTC+10", "UTC-5" into a static buffer (display + serial share it;
+    // use immediately, same pattern as other static scratch in this file).
+    static char buf[8];
+    int o = tz_offset_hours;
+    if(o == 0){ buf[0]='U'; buf[1]='T'; buf[2]='C'; buf[3]=0; return buf; }
+    buf[0]='U'; buf[1]='T'; buf[2]='C'; buf[3]=(o<0)?'-':'+';
+    int v = (o<0)?-o:o, p = 4;
+    char tmp[4]; int t=0;
+    while(v>0){ tmp[t++]=(char)('0'+v%10); v/=10; }
+    while(t--) buf[p++]=tmp[t];
+    buf[p]=0;
+    return buf;
+}
 void taskbar_draw(void){
     if(!fb_is_available()) return;
     int fb_h = fb_get_height();
@@ -621,7 +662,7 @@ void taskbar_draw(void){
     // No overlap by construction: 8 tabs max end at 5+8*155-5=1240, clock starts
     // ~1811 at 1920 wide; "+" hit-test starts at plus_x, 10px right of clock end.
     {
-        int total = clock_current_seconds(); // RTC seed + PIT advance, wraps at midnight
+        int total = clock_apply_tz(clock_current_seconds(), tz_offset_hours); // UTC base + display offset, wraps at midnight
         int ss = total % 60, mm = (total / 60) % 60, hh = total / 3600;
         char clk[9];
         clk[0]=(char)('0'+(hh/10)%10); clk[1]=(char)('0'+hh%10); clk[2]=':';
@@ -1309,11 +1350,11 @@ void wallpaper_cycle_preset(void){
 // (1Hz clock), adding ~100 rect+string ops to that frame, zero extra frames.
 #define CTX_W 152 // fits "Change Wallpaper" (16ch x 8px) + 24px padding
 #define CTX_ROW_H 24
-#define CTX_NITEMS 2
-#define CTX_H (8 + CTX_NITEMS*CTX_ROW_H) // 56
+#define CTX_NITEMS 3
+#define CTX_H (8 + CTX_NITEMS*CTX_ROW_H) // 80
 static int ctx_open = 0;
 static int ctx_x = 0, ctx_y = 0; // top-left, clamped on open
-static const char *ctx_labels[CTX_NITEMS] = {"New Window", "Change Wallpaper"};
+static const char *ctx_labels[CTX_NITEMS] = {"New Window", "Change Wallpaper", "Timezone"};
 void context_menu_open(int x, int y){
     int fb_w = fb_get_width(), fb_h = fb_get_height();
     ctx_x = x; ctx_y = y;
@@ -1345,8 +1386,19 @@ void context_menu_draw(void){
     if(!ctx_open || !fb_is_available()) return;
     fb_draw_rect(ctx_x, ctx_y, CTX_W, CTX_H, 0x00F0F0F0);
     gfx_draw_rect_outline(ctx_x, ctx_y, CTX_W, CTX_H, 0x00000000);
-    for(int i=0;i<CTX_NITEMS;i++)
-        gfx_draw_string(ctx_x + 12, ctx_y + 4 + i*CTX_ROW_H + 8, ctx_labels[i], 0x00000000);
+    for(int i=0;i<CTX_NITEMS;i++){
+        if(i==2){
+            // Dynamic label shows current zone: "TZ UTC+10" (16ch max = 128px + 24 pad = 152 = CTX_W).
+            char line[20]; const char *pfx="TZ "; int p=0;
+            while(pfx[p]){ line[p]=pfx[p]; p++; }
+            const char *zl = timezone_label();
+            for(int k=0; zl[k] && p<19; k++) line[p++]=zl[k];
+            line[p]=0;
+            gfx_draw_string(ctx_x + 12, ctx_y + 4 + i*CTX_ROW_H + 8, line, 0x00000000);
+        } else {
+            gfx_draw_string(ctx_x + 12, ctx_y + 4 + i*CTX_ROW_H + 8, ctx_labels[i], 0x00000000);
+        }
+    }
 }
 int context_menu_handle_click(int x, int y){
     // Left-click while open: item action + close, or outside-close. Consumed.
@@ -1354,6 +1406,7 @@ int context_menu_handle_click(int x, int y){
     int item = context_menu_hit(x, y);
     if(item == 0){ s_puts("CTX: action New Window\n"); window_create_new(); }
     else if(item == 1){ s_puts("CTX: action Change Wallpaper\n"); wallpaper_cycle_preset(); }
+    else if(item == 2){ s_puts("CTX: action Change Timezone\n"); timezone_cycle(); }
     else s_puts("CTX: click outside, close only\n");
     context_menu_close(); // sets redraw flag (covers action's own flag too)
     return 1;
