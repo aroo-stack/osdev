@@ -269,7 +269,7 @@ static void calculator_init_window(int nid){
     w_strcpy(w->title, "Calculator", 32);
     w->bg_color=0x00E8E8E8; w->title_color=0x00226644; w->border_color=0x00000000;
     w->visible=1; w->minimized=0; w->z=window_count;
-    w->has_textbox=0;
+    w->has_textbox=0; w->has_settings=0;
     w->has_calc=1;
     w->calc.display[0]='0'; w->calc.display[1]='.'; w->calc.display[2]='0'; w->calc.display[3]='0'; w->calc.display[4]=0; // "0.00"
     w->calc.acc=0; w->calc.op=0; w->calc.fresh=1; w->calc.err=0;
@@ -283,6 +283,71 @@ static void calculator_init_window(int nid){
         w->num_btns++;
     }
     w->task_counter=0;
+}
+
+// Shared tz preset table: timezone_cycle() steps it, Settings buttons index it
+// directly (b-3). City labels live in settings_init_window (display only).
+static const int tz_preset_offsets[TIMEZONE_PRESET_COUNT] = {0, 10, -5, 9};
+// --- Settings: 4th app, NO background task (same reasoning as Calculator:
+// purely reactive - state changes only in the button-up path, paints via
+// g_needs_redraw). Reuses the multi-button widget array (7 buttons).
+// Layout (window 380x220): "Wallpaper:" label + 3 direct-set buttons
+// (Day/Sunset/Night) in a row; "Timezone:" label + 2x2 grid with CITY labels
+// (display-only; same offsets/logic as tz presets). Selection highlight reads
+// wallpaper_preset / tz_offset_hours live - no duplicate state.
+static void settings_init_window(int nid){
+    struct window *w = &windows[nid];
+    static const char *wp[3] = {"Day", "Sunset", "Night"};
+    static const char *tz[4] = {"UTC", "Sydney (UTC+10)", "New York (UTC-5)", "Tokyo (UTC+9)"};
+    w->x=600; w->y=120; w->w=380; w->h=220;
+    w_strcpy(w->title, "Settings", 32);
+    w->bg_color=0x00E0E4EA; w->title_color=0x00334155; w->border_color=0x00000000;
+    w->visible=1; w->minimized=0; w->z=window_count;
+    w->has_textbox=0; w->has_calc=0; w->has_settings=1;
+    w->has_button=1; w->num_btns=0;
+    for(int i=0;i<3;i++){ // wallpaper row: y=52 h=30, x=20/136/252 w=106
+        w->btns[i].x = 20+i*116; w->btns[i].y = 52;
+        w->btns[i].w = 106; w->btns[i].h = 30;
+        w_strcpy(w->btns[i].label, wp[i], 32);
+        w->btns[i].pressed = 0; w->btns[i].clicks = 0;
+        w->num_btns++;
+    }
+    for(int i=0;i<4;i++){ // timezone 2x2: x=20/200 w=170, y=122/162 h=30
+        int b = 3+i;
+        w->btns[b].x = 20+(i%2)*180; w->btns[b].y = 122+(i/2)*40;
+        w->btns[b].w = 170; w->btns[b].h = 30;
+        w_strcpy(w->btns[b].label, tz[i], 32);
+        w->btns[b].pressed = 0; w->btns[b].clicks = 0;
+        w->num_btns++;
+    }
+    w->task_counter=0;
+}
+// Open-or-refocus shared by desktop icon idx5 and context menu "Open Settings".
+static void settings_open_or_focus(void){
+    int found = window_find_by_title("Settings");
+    if(found != -1){
+        s_puts("DESKTOP: action Settings bring to front\n");
+        if(windows[found].minimized) windows[found].minimized = 0;
+        window_bring_to_front(found);
+        return;
+    }
+    s_puts("DESKTOP: action Settings create (was closed)\n");
+    if(window_count < MAX_WINDOWS){
+        int nid = window_count;
+        settings_init_window(nid);
+        z_order[window_count]=nid; window_count++; for(int i=0;i<window_count;i++) windows[z_order[i]].z=i;
+        s_puts("DESKTOP: created Settings\n"); g_needs_redraw=1;
+    } else s_puts("DESKTOP: cannot create Settings - at max\n");
+}
+// Direct-SET (not cycle) via the same setters the old menu items called:
+// wallpaper_set_preset(b), timezone_set_offset(tz_preset_offsets[b-3]).
+// Setters flag redraw themselves, so the desktop updates immediately.
+static void settings_handle_button(struct window *w, int b){
+    (void)w;
+    if(b < 3) wallpaper_set_preset(b);
+    else timezone_set_offset(tz_preset_offsets[b-3]);
+    s_puts("SETTINGS: btn "); s_put_dec(b); s_puts(" wallpaper "); s_put_dec(wallpaper_preset);
+    s_puts(" tz "); s_puts(timezone_label()); s_puts("\n");
 }
 // FIXED-POINT model (no FPU anywhere: no CR0.EM handling, no FNINIT - out of
 // scope). All values stored as integers scaled by 100 (2 decimals): "1.55" is
@@ -432,7 +497,10 @@ static void layout_sync_window(struct window *w){
             w->btns[b].y = y0 + r*(bh+8);
             w->btns[b].w = bw; w->btns[b].h = bh;
         }
-    } else if(w->has_button){
+    } else if(w->has_button && !w->has_settings){
+        // Clicker ONLY (single centered button). Settings also has_button=1 but
+        // keeps its fixed grid from init - must be excluded or btns[0] ("Day")
+        // gets hijacked to the Clicker position every redraw.
         int bw = w->w*30/100; if(bw < 120) bw = 120; if(bw > 320) bw = 320; if(bw > w->w-40) bw = w->w-40;
         int bh = w->h*10/100; if(bh < 30) bh = 30; if(bh > 64) bh = 64; if(bh > w->h-60) bh = w->h-60;
         if(bw < 1) bw = 1; if(bh < 1) bh = 1;
@@ -496,6 +564,24 @@ static void window_draw_single(int idx){
         int dlen = 0; while(w->calc.display[dlen] && dlen < 32) dlen++;
         int sc = calc_display_scale(dh);
         gfx_draw_string_scaled(dx + dw - 4 - dlen*8*sc, dy + (dh-8*sc)/2, w->calc.display, 0x00000000, sc);
+    }
+    // Settings sections: titles + selection highlight. Active option read live
+    // from wallpaper_preset / tz_offset_hours (no duplicate state): green double
+    // outline around the selected button in each section. Setters flag redraw,
+    // so highlight follows clicks immediately with no extra frames.
+    if(w->has_settings){
+        gfx_draw_string(w->x+20, w->y+32, "Wallpaper:", 0x00000000);
+        gfx_draw_string(w->x+20, w->y+102, "Timezone:", 0x00000000);
+        int n = w->num_btns; if(n > MAX_BTNS) n = MAX_BTNS;
+        for(int b=0;b<n;b++){
+            int active = (b < 3) ? (wallpaper_preset == b)
+                                 : (tz_offset_hours == tz_preset_offsets[b-3]);
+            if(!active) continue;
+            int ax = w->x + w->btns[b].x, ay = w->y + w->btns[b].y;
+            int bw = w->btns[b].w, bh = w->btns[b].h;
+            gfx_draw_rect_outline(ax-2, ay-2, bw+4, bh+4, 0x00106428);
+            gfx_draw_rect_outline(ax-1, ay-1, bw+2, bh+2, 0x0016A34A);
+        }
     }
     if(w->title[0]=='T' && w->title[1]=='a' && w->title[5]=='M'){
         extern void pit_get_task_ticks(int *gui, int *a, int *b);
@@ -577,7 +663,6 @@ int clock_current_seconds(void){
 // UTC 02:00 (7200) -5h: (7200-18000)=-10800 % 86400 = -10800 -> +86400 = 75600 -> 21:00.
 // UTC 00:00 +0 -> 0; 23:59:59 (86399) +1h -> 89999%86400=3599 -> 00:59:59.
 int tz_offset_hours = 0; // BSS zero = UTC at boot
-static const int tz_preset_offsets[TIMEZONE_PRESET_COUNT] = {0, 10, -5, 9};
 static int tz_preset_idx = 0;
 int clock_apply_tz(int utc_sec, int off_hours){
     int local = (utc_sec + off_hours * 3600) % 86400;
@@ -687,8 +772,9 @@ void desktop_icons_init(void){
     desktop_icons[2].x = 20; desktop_icons[2].y = 240; w_strcpy(desktop_icons[2].label, "Clicker", 32); desktop_icons[2].color = 0x00336699; desktop_icons[2].selected = 0;
     desktop_icons[3].x = 20; desktop_icons[3].y = 340; w_strcpy(desktop_icons[3].label, "Notes", 32); desktop_icons[3].color = 0x00993333; desktop_icons[3].selected = 0;
     desktop_icons[4].x = 20; desktop_icons[4].y = 440; w_strcpy(desktop_icons[4].label, "Calculator", 32); desktop_icons[4].color = 0x00226644; desktop_icons[4].selected = 0;
-    desktop_icon_count = 5;
-    s_puts("DESKTOP: icons init 5 at (20,40) New Window, (20,140) Task Manager, (20,240) Clicker, (20,340) Notes, (20,440) Calculator\n");
+    desktop_icons[5].x = 20; desktop_icons[5].y = 540; w_strcpy(desktop_icons[5].label, "Settings", 32); desktop_icons[5].color = 0x00334155; desktop_icons[5].selected = 0;
+    desktop_icon_count = 6;
+    s_puts("DESKTOP: icons init 6 at (20,40) New Window, (20,140) Task Manager, (20,240) Clicker, (20,340) Notes, (20,440) Calculator, (20,540) Settings\n");
 }
 // Notes icon: white notepad sheet with gray rules, teal top bar, silver spiral
 // binding, navy fountain pen, and a solid offset drop shadow. Painted with
@@ -847,6 +933,25 @@ static void draw_calc_icon(int gx, int gy){
         fb_draw_rect(kx, ky, 3, 3, kc);
     }
 }
+// Settings icon: dark slate panel with 3 slider rows (track + knob squares)
+// in mint/amber/sky accents, plus solid offset drop shadow. Same 32x32 canvas
+// and solid-primitive style as the other glyphs.
+static void draw_settings_icon(int gx, int gy){
+    uint32_t body = 0x00334155;     // slate panel
+    uint32_t edge = 0x00000000;
+    uint32_t track = 0x0094A3B8;    // slider tracks
+    uint32_t shadow = 0x00141824;
+    int bx = gx + 6, by = gy + 5;   // 20x22 panel centered in canvas
+    fb_draw_rect(bx+2, by+2, 20, 22, shadow);
+    fb_draw_rect(bx, by, 20, 22, body);
+    gfx_draw_rect_outline(bx, by, 20, 22, edge);
+    static const uint32_t knobs[3] = {0x006EE7B7, 0x00F59E0B, 0x0038BDF8};
+    for(int r=0;r<3;r++){
+        int ry = by + 4 + r*6;
+        fb_draw_rect(bx+3, ry+1, 14, 2, track);
+        fb_draw_rect(bx+3 + (r*5+2), ry, 4, 4, knobs[r]);
+    }
+}
 void desktop_icons_draw(void){
     if(!fb_is_available()) return;
     for(int i=0;i<desktop_icon_count;i++){
@@ -858,6 +963,7 @@ void desktop_icons_draw(void){
         else if(i==2){ draw_clicker_icon(gx, gy); }
         else if(i==3){ draw_notes_icon(gx, gy); }
         else if(i==4){ draw_calc_icon(gx, gy); }
+        else if(i==5){ draw_settings_icon(gx, gy); }
         int len=0; while(ic->label[len] && len<32) len++;
         int tx = ix + (ICON_W - len*8)/2; int ty = iy + 4 + ICON_GLYPH + 6;
         if(ic->selected){ int bg_w = len*8 + 6; int bg_h = 10; int bg_x = tx - 3; int bg_y = ty - 1; fb_draw_rect(bg_x, bg_y, bg_w, bg_h, 0x000000FF); gfx_draw_string(tx, ty, ic->label, 0x00FFFFFF); }
@@ -881,7 +987,7 @@ int desktop_icon_handle_click(int x, int y){
         s_puts("DESKTOP: double-click icon "); s_put_dec(idx); s_puts("\n");
         for(int i=0;i<desktop_icon_count;i++) desktop_icons[i].selected = (i==idx); selected_icon = idx; last_click_icon = -1; last_click_tick = -1000;
         if(idx==0){ s_puts("DESKTOP: action New Window\n"); window_create_new(); }
-        else if(idx==1){ int found=-1; for(int i=0;i<window_count;i++) if(icon_streq(windows[i].title, "Task Manager")) { found=i; break; } if(found!=-1){ s_puts("DESKTOP: action Task Manager bring to front\n"); if(windows[found].minimized){ windows[found].minimized=0; s_puts("DESKTOP: unminimize Task Manager\n"); } window_bring_to_front(found); } else { s_puts("DESKTOP: action Task Manager create (was closed)\n"); if(window_count < MAX_WINDOWS){ int nid = window_count; windows[nid].x=600; windows[nid].y=100; windows[nid].w=300; windows[nid].h=200; w_strcpy(windows[nid].title, "Task Manager", 32); windows[nid].bg_color=0x00F0F0F0; windows[nid].title_color=0x00333333; windows[nid].border_color=0x00000000; windows[nid].visible=1; windows[nid].minimized=0; windows[nid].z=window_count; windows[nid].has_button=0; windows[nid].num_btns=0; windows[nid].has_textbox=0; windows[nid].has_calc=0; windows[nid].task_counter=0; z_order[window_count]=nid; window_count++; for(int i=0;i<window_count;i++) windows[z_order[i]].z=i; s_puts("DESKTOP: created Task Manager\n"); g_needs_redraw=1; } else s_puts("DESKTOP: cannot create Task Manager - at max\n"); } }
+        else if(idx==1){ int found=-1; for(int i=0;i<window_count;i++) if(icon_streq(windows[i].title, "Task Manager")) { found=i; break; } if(found!=-1){ s_puts("DESKTOP: action Task Manager bring to front\n"); if(windows[found].minimized){ windows[found].minimized=0; s_puts("DESKTOP: unminimize Task Manager\n"); } window_bring_to_front(found); } else { s_puts("DESKTOP: action Task Manager create (was closed)\n"); if(window_count < MAX_WINDOWS){ int nid = window_count; windows[nid].x=600; windows[nid].y=100; windows[nid].w=300; windows[nid].h=200; w_strcpy(windows[nid].title, "Task Manager", 32); windows[nid].bg_color=0x00F0F0F0; windows[nid].title_color=0x00333333; windows[nid].border_color=0x00000000; windows[nid].visible=1; windows[nid].minimized=0; windows[nid].z=window_count; windows[nid].has_button=0; windows[nid].num_btns=0; windows[nid].has_textbox=0; windows[nid].has_calc=0; windows[nid].has_settings=0; windows[nid].task_counter=0; z_order[window_count]=nid; window_count++; for(int i=0;i<window_count;i++) windows[z_order[i]].z=i; s_puts("DESKTOP: created Task Manager\n"); g_needs_redraw=1; } else s_puts("DESKTOP: cannot create Task Manager - at max\n"); } }
         else if(idx==2){ // Clicker
             int found=-1; for(int i=0;i<window_count;i++) if(icon_streq(windows[i].title, "Clicker")) { found=i; break; }
             if(found!=-1){ s_puts("DESKTOP: action Clicker bring to front\n"); if(windows[found].minimized){ windows[found].minimized=0; } window_bring_to_front(found); }
@@ -903,7 +1009,7 @@ int desktop_icon_handle_click(int x, int y){
                     windows[nid].bg_color=0x00E0E0E0; windows[nid].title_color=0x00336699; windows[nid].border_color=0x00000000;
                     windows[nid].visible=1; windows[nid].minimized=0; windows[nid].z=window_count; windows[nid].has_button=1; windows[nid].num_btns=1;
                     windows[nid].btns[0].x=20; windows[nid].btns[0].y=40; windows[nid].btns[0].w=120; windows[nid].btns[0].h=30; w_strcpy(windows[nid].btns[0].label, "Click Me", 32); windows[nid].btns[0].pressed=0; windows[nid].btns[0].clicks=0;
-                    windows[nid].has_textbox=0; windows[nid].has_calc=0; windows[nid].task_counter=0;
+                    windows[nid].has_textbox=0; windows[nid].has_calc=0; windows[nid].has_settings=0; windows[nid].task_counter=0;
                     z_order[window_count]=nid; window_count++; for(int i=0;i<window_count;i++) windows[z_order[i]].z=i;
                     s_puts("DESKTOP: created Clicker\n"); g_needs_redraw=1;
                 } else s_puts("DESKTOP: cannot create Clicker - at max\n");
@@ -926,7 +1032,7 @@ int desktop_icon_handle_click(int x, int y){
                     windows[nid].x=250; windows[nid].y=180; windows[nid].w=400; windows[nid].h=300;
                     w_strcpy(windows[nid].title, "Notes", 32);
                     windows[nid].bg_color=0x00D0D0FF; windows[nid].title_color=0x00993333; windows[nid].border_color=0x00000000;
-                    windows[nid].visible=1; windows[nid].minimized=0; windows[nid].z=window_count; windows[nid].has_button=0; windows[nid].num_btns=0; windows[nid].has_textbox=1; windows[nid].has_calc=0;
+                    windows[nid].visible=1; windows[nid].minimized=0; windows[nid].z=window_count; windows[nid].has_button=0; windows[nid].num_btns=0; windows[nid].has_textbox=1; windows[nid].has_calc=0; windows[nid].has_settings=0;
                     windows[nid].tbox.x=20; windows[nid].tbox.y=40; windows[nid].tbox.w=360; windows[nid].tbox.h=60; windows[nid].tbox.max_len=512; notes_restore_to(nid); // placeholder rect: layout_sync recomputes; session text (empty on fresh boot)
                     windows[nid].task_counter=0;
                     z_order[window_count]=nid; window_count++; for(int i=0;i<window_count;i++) windows[z_order[i]].z=i;
@@ -946,6 +1052,9 @@ int desktop_icon_handle_click(int x, int y){
                     s_puts("DESKTOP: created Calculator\n"); g_needs_redraw=1;
                 } else s_puts("DESKTOP: cannot create Calculator - at max\n");
             }
+        }
+        else if(idx==5){ // Settings - window only, NO background task (purely reactive)
+            settings_open_or_focus();
         }
         g_needs_redraw=1; return 1;
     } else {
@@ -972,7 +1081,7 @@ void window_manager_init(void){
     windows[0].z = 0;
     windows[0].has_button = 1;
     windows[0].num_btns = 1; // single button at index 0 (was struct button btn)
-    windows[0].has_textbox = 0; windows[0].has_calc = 0;
+    windows[0].has_textbox = 0; windows[0].has_calc = 0; windows[0].has_settings = 0;
     windows[0].btns[0].x = 20; windows[0].btns[0].y = 40; windows[0].btns[0].w = 120; windows[0].btns[0].h = 30;
     w_strcpy(windows[0].btns[0].label, "Click Me", 32);
     windows[0].btns[0].pressed = 0;
@@ -988,6 +1097,7 @@ void window_manager_init(void){
     windows[1].has_button = 0;
     windows[1].num_btns = 0;
     windows[1].has_calc = 0;
+    windows[1].has_settings = 0;
     windows[1].has_textbox = 1;
     windows[1].tbox.x = 20; windows[1].tbox.y = 40; windows[1].tbox.w = 360; windows[1].tbox.h = 60; // placeholder: layout_sync_window recomputes from w/h on first redraw (-> 360x220 at 400x300)
     windows[1].tbox.max_len = 512;
@@ -1000,16 +1110,16 @@ void window_manager_init(void){
     windows[1].task_counter = 0;
 
     windows[2].x = 0; windows[2].y = 0; windows[2].w = 0; windows[2].h = 0;
-    windows[2].visible = 0; windows[2].minimized = 0; windows[2].has_button = 0; windows[2].num_btns = 0; windows[2].has_textbox = 0; windows[2].has_calc = 0; windows[2].task_counter = 0;
+    windows[2].visible = 0; windows[2].minimized = 0; windows[2].has_button = 0; windows[2].num_btns = 0; windows[2].has_textbox = 0; windows[2].has_calc = 0; windows[2].has_settings = 0; windows[2].task_counter = 0;
     windows[3].x = 0; windows[3].y = 0; windows[3].w = 0; windows[3].h = 0;
-    windows[3].visible = 0; windows[3].minimized = 0; windows[3].has_button = 0; windows[3].num_btns = 0; windows[3].has_textbox = 0; windows[3].has_calc = 0; windows[3].task_counter = 0;
+    windows[3].visible = 0; windows[3].minimized = 0; windows[3].has_button = 0; windows[3].num_btns = 0; windows[3].has_textbox = 0; windows[3].has_calc = 0; windows[3].has_settings = 0; windows[3].task_counter = 0;
 
     window_count = 2;
     // z_order 0..1 back->front corresponds to windows index order initially
     for(int i=0;i<window_count;i++) z_order[i]=i;
 
     desktop_icons_init();
-    s_puts("WM: created 2 windows (Clicker button, Notes textbox) + 5 desktop icons\n");
+    s_puts("WM: created 2 windows (Clicker button, Notes textbox) + 6 desktop icons\n");
     // Build wallpaper cache once (draws Bliss then snapshots, measures flat vs Bliss vs blit)
     wallpaper_cache_build_once();
     window_manager_draw_all();
@@ -1110,6 +1220,7 @@ int window_create_new(void){
     windows[idx].num_btns = 0;
     windows[idx].has_textbox = 0;
     windows[idx].has_calc = 0;
+    windows[idx].has_settings = 0;
     windows[idx].task_counter = 0;
     z_order[window_count] = idx;
     window_count++;
@@ -1348,13 +1459,15 @@ void wallpaper_cycle_preset(void){
 // idle-Hz fix): flags ONLY on open/close/action. While open and idle nothing
 // sets flags - the menu repaints as part of whatever redraws already happen
 // (1Hz clock), adding ~100 rect+string ops to that frame, zero extra frames.
-#define CTX_W 152 // fits "Change Wallpaper" (16ch x 8px) + 24px padding
+#define CTX_W 152 // fits "Open Settings" (13ch x 8px) + padding
 #define CTX_ROW_H 24
-#define CTX_NITEMS 3
-#define CTX_H (8 + CTX_NITEMS*CTX_ROW_H) // 80
+#define CTX_NITEMS 2
+#define CTX_H (8 + CTX_NITEMS*CTX_ROW_H) // 56
 static int ctx_open = 0;
 static int ctx_x = 0, ctx_y = 0; // top-left, clamped on open
-static const char *ctx_labels[CTX_NITEMS] = {"New Window", "Change Wallpaper", "Timezone"};
+// Wallpaper/timezone cycling moved into the Settings app; menu offers it via
+// "Open Settings" (same open-or-refocus as the desktop icon).
+static const char *ctx_labels[CTX_NITEMS] = {"New Window", "Open Settings"};
 void context_menu_open(int x, int y){
     int fb_w = fb_get_width(), fb_h = fb_get_height();
     ctx_x = x; ctx_y = y;
@@ -1386,27 +1499,15 @@ void context_menu_draw(void){
     if(!ctx_open || !fb_is_available()) return;
     fb_draw_rect(ctx_x, ctx_y, CTX_W, CTX_H, 0x00F0F0F0);
     gfx_draw_rect_outline(ctx_x, ctx_y, CTX_W, CTX_H, 0x00000000);
-    for(int i=0;i<CTX_NITEMS;i++){
-        if(i==2){
-            // Dynamic label shows current zone: "TZ UTC+10" (16ch max = 128px + 24 pad = 152 = CTX_W).
-            char line[20]; const char *pfx="TZ "; int p=0;
-            while(pfx[p]){ line[p]=pfx[p]; p++; }
-            const char *zl = timezone_label();
-            for(int k=0; zl[k] && p<19; k++) line[p++]=zl[k];
-            line[p]=0;
-            gfx_draw_string(ctx_x + 12, ctx_y + 4 + i*CTX_ROW_H + 8, line, 0x00000000);
-        } else {
-            gfx_draw_string(ctx_x + 12, ctx_y + 4 + i*CTX_ROW_H + 8, ctx_labels[i], 0x00000000);
-        }
-    }
+    for(int i=0;i<CTX_NITEMS;i++)
+        gfx_draw_string(ctx_x + 12, ctx_y + 4 + i*CTX_ROW_H + 8, ctx_labels[i], 0x00000000);
 }
 int context_menu_handle_click(int x, int y){
     // Left-click while open: item action + close, or outside-close. Consumed.
     if(!ctx_open) return 0;
     int item = context_menu_hit(x, y);
     if(item == 0){ s_puts("CTX: action New Window\n"); window_create_new(); }
-    else if(item == 1){ s_puts("CTX: action Change Wallpaper\n"); wallpaper_cycle_preset(); }
-    else if(item == 2){ s_puts("CTX: action Change Timezone\n"); timezone_cycle(); }
+    else if(item == 1){ s_puts("CTX: action Open Settings\n"); settings_open_or_focus(); }
     else s_puts("CTX: click outside, close only\n");
     context_menu_close(); // sets redraw flag (covers action's own flag too)
     return 1;
@@ -1600,10 +1701,12 @@ void window_update_resize(int x, int y){
     // Enforce minimum - per-app fixed minimums matched to layout_sync clamps,
     // so widgets never shrink to unusable/overlapping sizes:
     // Calculator grid needs bw>=40/bh>=24 -> 240x240; Clicker button 120x30
-    // centered -> 200x140; Notes textbox + labels -> 200x140.
+    // centered -> 200x140; Notes textbox + labels -> 200x140; Settings fixed
+    // grid (380x220, not synced) -> pinned at creation size.
     int min_w = WIN_MIN_W;
     int min_h = WIN_MIN_H;
-    if(w->has_calc){ min_w = 240; min_h = 240; }
+    if(w->has_settings){ min_w = 380; min_h = 220; }
+    else if(w->has_calc){ min_w = 240; min_h = 240; }
     else if(w->has_textbox){ if(min_w < 200) min_w = 200; if(min_h < 140) min_h = 140; }
     else if(w->has_button){ if(min_w < 200) min_w = 200; if(min_h < 140) min_h = 140; }
     if(new_w < min_w) new_w = min_w;
@@ -1930,6 +2033,8 @@ int window_handle_button_up(int x, int y){
         // label "Clicked: N" - pixel- and serial-identical to before).
         if(w->has_calc){
             calculator_handle_button(w, pressed_b);
+        } else if(w->has_settings){
+            settings_handle_button(w, pressed_b);
         } else {
             w->btns[pressed_b].clicks++;
         char buf[32];

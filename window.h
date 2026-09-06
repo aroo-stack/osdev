@@ -12,7 +12,7 @@
 #define RESIZE_HANDLE 12
 #define WIN_MIN_W 150
 #define WIN_MIN_H 100
-#define MAX_ICONS 5
+#define MAX_ICONS 6
 #define ICON_W 64
 #define ICON_H 64
 #define ICON_GLYPH 32
@@ -59,6 +59,7 @@ struct window {
     int has_textbox;
     struct calc_state calc; // meaningful only when has_calc == 1
     int has_calc; // 1 = Calculator app window (no background task, purely reactive)
+    int has_settings; // 1 = Settings app window (no task; multi-button option grid)
     volatile int task_counter; // owned by Clicker/Notes tasks, drawn by GUI task - single-word atomic
 };
 extern struct window windows[];
