@@ -238,12 +238,14 @@ int textbox_word_count(struct textbox *tb){
 // context) and paints via g_needs_redraw. A task would burn PIT timeslices
 // redrawing nothing. Task Manager lists tids 1-2 only, so Calculator is
 // correctly absent there - it shows tasks, not windows.
-// Geometry (window 304x300): display at (20,30) 264x30; grid origin (20,76),
-// buttons 60x36, gap 8 -> col x=20+c*68, row y=76+r*44; grid bottom 244.
+// Geometry (default window 304x264): display at (20,30), width stretches as
+// W-40; grid origin (20,76), buttons 60x36, gap 8 -> col x=20+c*68, row
+// y=76+r*44 at default size; layout_sync_window recomputes from CURRENT w/h
+// on every redraw (bottom margin 20: grid bottom 244 at default height 264).
 static void calculator_init_window(int nid){
     struct window *w = &windows[nid];
     static const char *labels[4][4] = {{"7","8","9","/"},{"4","5","6","*"},{"1","2","3","-"},{"0","C","=","+"}};
-    w->x=500; w->y=140; w->w=304; w->h=300;
+    w->x=500; w->y=140; w->w=304; w->h=264;
     w_strcpy(w->title, "Calculator", 32);
     w->bg_color=0x00E8E8E8; w->title_color=0x00226644; w->border_color=0x00000000;
     w->visible=1; w->minimized=0; w->z=window_count;
@@ -335,9 +337,47 @@ static void calculator_handle_button(struct window *w, int b){
     s_puts("CALC: btn "); s_puts(w->btns[b].label); s_puts(" display "); s_puts(c->display); s_puts("\n");
 }
 
+// Responsive layout: recompute AND STORE every widget rect from the window's
+// CURRENT w/h at the start of every redraw. Hit-testing reads these same stored
+// rects, so visuals and hit-test share one source of truth and cannot drift.
+// (Between a resize and the next redraw, hit-test uses pre-resize rects - which
+// still match the pre-resize pixels on screen. That is the correct invariant.)
+// Math (traced):
+// - Calculator (W x H, 4x4 grid, gap 8, sides 20, grid top 76, bottom margin 20):
+//   bw=(W-64)/4, bh=(H-120)/4. At default 304x264: 60x36 at 20+c*68, 76+r*44.
+// - Clicker (single button, proportional + centered): bw=W*30/100 in [120,320],
+//   bh=H*10/100 in [30,64], x=(W-bw)/2, y=(H-bh)/2. At 400x300: 120x30@(140,135).
+// - Notes (textbox): x=20, y=40, w=W-40, h=H-80 (20 side margins, 40 top for
+//   title+pad, bottom leaves 20 margin + 12 labels + 8 gap). At 400x300: 360x220.
+static void layout_sync_window(struct window *w){
+    if(w->has_calc){
+        int bw = (w->w - 64)/4; if(bw < 40) bw = 40;
+        int bh = (w->h - 120)/4; if(bh < 24) bh = 24;
+        int n = w->num_btns; if(n > MAX_BTNS) n = MAX_BTNS;
+        for(int b=0;b<n;b++){
+            int c = b%4, r = b/4;
+            w->btns[b].x = 20 + c*(bw+8);
+            w->btns[b].y = 76 + r*(bh+8);
+            w->btns[b].w = bw; w->btns[b].h = bh;
+        }
+    } else if(w->has_button){
+        int bw = w->w*30/100; if(bw < 120) bw = 120; if(bw > 320) bw = 320; if(bw > w->w-40) bw = w->w-40;
+        int bh = w->h*10/100; if(bh < 30) bh = 30; if(bh > 64) bh = 64; if(bh > w->h-60) bh = w->h-60;
+        if(bw < 1) bw = 1; if(bh < 1) bh = 1;
+        w->btns[0].x = (w->w - bw)/2; w->btns[0].y = (w->h - bh)/2;
+        w->btns[0].w = bw; w->btns[0].h = bh;
+    }
+    if(w->has_textbox){
+        w->tbox.x = 20; w->tbox.y = 40;
+        w->tbox.w = w->w - 40; if(w->tbox.w < 80) w->tbox.w = 80;
+        w->tbox.h = w->h - 80; if(w->tbox.h < 40) w->tbox.h = 40;
+    }
+}
+
 static void window_draw_single(int idx){
     struct window *w = &windows[idx];
     if(!w->visible || w->minimized) return;
+    layout_sync_window(w); // responsive: recompute widget rects from CURRENT w/h first
     fb_draw_rect(w->x, w->y, w->w, w->h, w->bg_color);
     fb_draw_rect(w->x, w->y, w->w, TITLE_BAR_H, w->title_color);
     gfx_draw_rect_outline(w->x, w->y, w->w, w->h, w->border_color);
@@ -361,17 +401,21 @@ static void window_draw_single(int idx){
         else { char rev[12]; int r = 0; while(n > 0){ rev[r++] = (char)('0' + n % 10); n /= 10; } while(r > 0){ r--; tmp[t++] = rev[r]; } }
         for(int i = 0; i < t && p < 31; i++) line[p++] = tmp[i];
         line[p] = 0;
-        int wx = w->x + 20, wy = w->y + 108;
+        // Anchored below the (live-resized) textbox, not at a fixed offset:
+        // wy = tbox bottom + 8. At default 400x300 (tbox 360x220): y=268.
+        int wx = w->x + w->tbox.x, wy = w->y + w->tbox.y + w->tbox.h + 8;
         fb_draw_rect(wx - 2, wy - 2, 120, 12, w->bg_color); // clear stale digits ("10" -> "9")
         gfx_draw_string(wx, wy, line, 0x00000000);
         // Session-persistence indicator: text is snapshotted on every close
         // and restored on reopen, until reboot (BSS buffer, no disk).
         gfx_draw_string(wx + 130, wy, "autosaved (session)", 0x00000000);
     }
-    // Calculator display: white box at window-relative (20,30) 264x30,
-    // right-aligned text ("0", "10", "-5", "Error").
+    // Calculator display: white box at window-relative (20,30), width stretches
+    // as W-40 (layout_sync owns buttons; display needs no hit-test, drawn live).
+    // Right-aligned text ("0", "10", "-5", "Error").
     if(w->has_calc){
-        int dx = w->x + 20, dy = w->y + 30, dw = 264, dh = 30;
+        int dx = w->x + 20, dy = w->y + 30, dw = w->w - 40, dh = 30;
+        if(dw < 80) dw = 80;
         fb_draw_rect(dx, dy, dw, dh, 0x00FFFFFF);
         gfx_draw_rect_outline(dx, dy, dw, dh, 0x00000000);
         int dlen = 0; while(w->calc.display[dlen] && dlen < 32) dlen++;
@@ -740,7 +784,7 @@ int desktop_icon_handle_click(int x, int y){
                     w_strcpy(windows[nid].title, "Notes", 32);
                     windows[nid].bg_color=0x00D0D0FF; windows[nid].title_color=0x00993333; windows[nid].border_color=0x00000000;
                     windows[nid].visible=1; windows[nid].minimized=0; windows[nid].z=window_count; windows[nid].has_button=0; windows[nid].num_btns=0; windows[nid].has_textbox=1; windows[nid].has_calc=0;
-                    windows[nid].tbox.x=20; windows[nid].tbox.y=40; windows[nid].tbox.w=360; windows[nid].tbox.h=60; windows[nid].tbox.max_len=512; notes_restore_to(nid); // session text (empty on fresh boot)
+                    windows[nid].tbox.x=20; windows[nid].tbox.y=40; windows[nid].tbox.w=360; windows[nid].tbox.h=60; windows[nid].tbox.max_len=512; notes_restore_to(nid); // placeholder rect: layout_sync recomputes; session text (empty on fresh boot)
                     windows[nid].task_counter=0;
                     z_order[window_count]=nid; window_count++; for(int i=0;i<window_count;i++) windows[z_order[i]].z=i;
                     s_puts("DESKTOP: created Notes\n"); g_needs_redraw=1;
@@ -802,7 +846,7 @@ void window_manager_init(void){
     windows[1].num_btns = 0;
     windows[1].has_calc = 0;
     windows[1].has_textbox = 1;
-    windows[1].tbox.x = 20; windows[1].tbox.y = 40; windows[1].tbox.w = 360; windows[1].tbox.h = 60; // taller to show 5 lines (was 30 for 2 lines)
+    windows[1].tbox.x = 20; windows[1].tbox.y = 40; windows[1].tbox.w = 360; windows[1].tbox.h = 60; // placeholder: layout_sync_window recomputes from w/h on first redraw (-> 360x220 at 400x300)
     windows[1].tbox.max_len = 512;
     windows[1].tbox.len = 0;
     windows[1].tbox.buffer[0]=0;
@@ -1288,30 +1332,15 @@ void window_update_resize(int x, int y){
     struct window *w = &windows[resize_win];
     int new_w = (x - resize_off_x) - w->x;
     int new_h = (y - resize_off_y) - w->y;
-    // Enforce minimum - per-window based on content so button/textbox stay inside
-    // Stay at same relative offset from top-left, don't scale them; clamp min high enough
+    // Enforce minimum - per-app fixed minimums matched to layout_sync clamps,
+    // so widgets never shrink to unusable/overlapping sizes:
+    // Calculator grid needs bw>=40/bh>=24 -> 240x240; Clicker button 120x30
+    // centered -> 200x140; Notes textbox + labels -> 200x140.
     int min_w = WIN_MIN_W;
     int min_h = WIN_MIN_H;
-    if(w->has_button){
-        // Bounding box over all buttons (Clicker: single button, same numbers as before)
-        int need_w = min_w, need_h = min_h;
-        int n = w->num_btns;
-        if(n > MAX_BTNS) n = MAX_BTNS;
-        for(int b=0;b<n;b++){
-            int bw = w->btns[b].x + w->btns[b].w + 10;
-            if(bw > need_w) need_w = bw;
-            int bh = w->btns[b].y + w->btns[b].h + 10;
-            if(bh > need_h) need_h = bh;
-        }
-        if(need_w > min_w) min_w = need_w;
-        if(need_h > min_h) min_h = need_h;
-    }
-    if(w->has_textbox){
-        int need_w2 = w->tbox.x + w->tbox.w + 10;
-        if(need_w2 > min_w) min_w = need_w2;
-        int need_h2 = w->tbox.y + w->tbox.h + 10;
-        if(need_h2 > min_h) min_h = need_h2;
-    }
+    if(w->has_calc){ min_w = 240; min_h = 240; }
+    else if(w->has_textbox){ if(min_w < 200) min_w = 200; if(min_h < 140) min_h = 140; }
+    else if(w->has_button){ if(min_w < 200) min_w = 200; if(min_h < 140) min_h = 140; }
     if(new_w < min_w) new_w = min_w;
     if(new_h < min_h) new_h = min_h;
     int max_w = (int)fb_get_width() - w->x;
