@@ -114,6 +114,14 @@ static void cursor_draw(int x, int y){
 void mouse_cursor_restore(void){ cursor_restore(); }
 void mouse_cursor_draw_current(void){ cursor_draw(mouse_x, mouse_y); }
 void mouse_cursor_invalidate(void){ saved_valid = 0; }
+// Swap the union of old-drawn and new cursor boxes (direct cursor-move path:
+// restore+draw touch only these boxes, so a full swap would waste ~8MB).
+static void cursor_swap_boxes(int ox, int oy, int nx, int ny){
+    int x0 = ox<nx?ox:nx, y0 = oy<ny?oy:ny;
+    int xa = ox+CURSOR_W>nx+CURSOR_W?ox+CURSOR_W:nx+CURSOR_W;
+    int ya = oy+CURSOR_H>ny+CURSOR_H?oy+CURSOR_H:ny+CURSOR_H;
+    if(fb_is_double_buffered()) fb_swap_region(x0,y0,xa-x0,ya-y0);
+}
 
 static uint8_t prev_buttons = 0;
 static uint64_t g_last_tsc = 0;
@@ -181,10 +189,11 @@ void mouse_handle_byte(uint8_t data){
                 __asm__ volatile("cli");
                 window_end_drag();
                 if(moved && fb_is_available()){
+                    int ox = mouse_x, oy = mouse_y; // pre-move box for region swap
                     cursor_restore();
                     mouse_x = new_x; mouse_y = new_y;
                     cursor_draw(mouse_x, mouse_y);
-                    if(fb_is_double_buffered()) fb_swap();
+                    cursor_swap_boxes(ox, oy, new_x, new_y);
                 } else {
                     mouse_x = new_x; mouse_y = new_y;
                 }
@@ -202,10 +211,11 @@ void mouse_handle_byte(uint8_t data){
                 __asm__ volatile("cli");
                 window_end_resize();
                 if(moved && fb_is_available()){
+                    int ox = mouse_x, oy = mouse_y; // pre-move box for region swap
                     cursor_restore();
                     mouse_x = new_x; mouse_y = new_y;
                     cursor_draw(mouse_x, mouse_y);
-                    if(fb_is_double_buffered()) fb_swap();
+                    cursor_swap_boxes(ox, oy, new_x, new_y);
                 } else {
                     mouse_x = new_x; mouse_y = new_y;
                 }
@@ -265,9 +275,12 @@ void mouse_handle_byte(uint8_t data){
                         // empty desktop (not taskbar/window/icon) -> deselect any selected icon
                         if(fb_is_available()) desktop_icon_deselect_all();
                         if(moved && fb_is_available()){
+                            // mouse_x/y already == new here; old drawn pos is the saved box.
+                            int ox = saved_valid ? saved_x : new_x;
+                            int oy = saved_valid ? saved_y : new_y;
                             cursor_restore();
                             cursor_draw(new_x, new_y);
-                            if(fb_is_double_buffered()) fb_swap();
+                            cursor_swap_boxes(ox, oy, new_x, new_y);
                         }
                     }
                 }
@@ -281,17 +294,21 @@ void mouse_handle_byte(uint8_t data){
                 handled = window_handle_button_up(new_x, new_y);
             }
             if(!handled && moved && fb_is_available()){
+                // mouse_x/y already == new here; old drawn pos is the saved box.
+                int ox = saved_valid ? saved_x : new_x;
+                int oy = saved_valid ? saved_y : new_y;
                 cursor_restore();
                 cursor_draw(mouse_x, mouse_y);
-                if(fb_is_double_buffered()) fb_swap();
+                cursor_swap_boxes(ox, oy, new_x, new_y);
             }
             __asm__ volatile("sti");
         } else if(moved && fb_is_available()){
-            // Defer even simple moves to main loop to avoid race with window's textbox cursor and double-buffer save/restore
+            // Defer even simple moves to main loop to avoid race with window's textbox cursor and double-buffer save/restore.
+            // Record just the new cursor box (do_redraw restores the old box from
+            // saved pixels and swaps the new box separately - no union stretch).
             mouse_x = new_x;
             mouse_y = new_y;
-            extern volatile int g_needs_redraw;
-            g_needs_redraw = 1;
+            dirty_add(new_x, new_y, CURSOR_W, CURSOR_H);
         } else {
             mouse_x = new_x;
             mouse_y = new_y;

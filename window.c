@@ -336,16 +336,18 @@ static void settings_open_or_focus(void){
         int nid = window_count;
         settings_init_window(nid);
         z_order[window_count]=nid; window_count++; for(int i=0;i<window_count;i++) windows[z_order[i]].z=i;
-        s_puts("DESKTOP: created Settings\n"); g_needs_redraw=1;
+        s_puts("DESKTOP: created Settings\n"); window_invalidate(nid);
     } else s_puts("DESKTOP: cannot create Settings - at max\n");
 }
 // Direct-SET (not cycle) via the same setters the old menu items called:
 // wallpaper_set_preset(b), timezone_set_offset(tz_preset_offsets[b-3]).
 // Setters flag redraw themselves, so the desktop updates immediately.
 static void settings_handle_button(struct window *w, int b){
-    (void)w;
-    if(b < 3) wallpaper_set_preset(b);
+    if(b < 3) wallpaper_set_preset(b); // rebuild dirties full screen itself
     else timezone_set_offset(tz_preset_offsets[b-3]);
+    // Settings window (highlight follows) + taskbar clock area (tz jumps).
+    dirty_add(w->x, w->y, w->w, w->h);
+    taskbar_clock_invalidate();
     s_puts("SETTINGS: btn "); s_put_dec(b); s_puts(" wallpaper "); s_put_dec(wallpaper_preset);
     s_puts(" tz "); s_puts(timezone_label()); s_puts("\n");
 }
@@ -455,7 +457,7 @@ static void calculator_handle_button(struct window *w, int b){
         calc_format_scaled(r, c->display);
         c->acc = r; c->op = 0; c->fresh = 1;
     }
-    g_needs_redraw = 1;
+    dirty_add(w->x, w->y, w->w, w->h); // display + shading changes live inside this window
     s_puts("CALC: btn "); s_puts(w->btns[b].label); s_puts(" display "); s_puts(c->display); s_puts("\n");
 }
 
@@ -675,7 +677,7 @@ void timezone_set_offset(int hours){
     tz_preset_idx = 0;
     for(int i=0;i<TIMEZONE_PRESET_COUNT;i++) if(tz_preset_offsets[i]==hours) tz_preset_idx = i;
     s_puts("TZ: now "); s_puts(timezone_label()); s_puts("\n");
-    g_needs_redraw = 1;
+    // No flag here: caller (Settings button) dirties its window + clock area.
 }
 void timezone_cycle(void){
     tz_preset_idx = (tz_preset_idx + 1) % TIMEZONE_PRESET_COUNT;
@@ -952,11 +954,20 @@ static void draw_settings_icon(int gx, int gy){
         fb_draw_rect(bx+3 + (r*5+2), ry, 4, 4, knobs[r]);
     }
 }
+// Paint-bounds + overlap helper for dirty-rect skip checks. Defined here
+// (before first use in desktop_icons_draw); set per-frame by window_do_redraw,
+// full-screen by boot init before its direct draw_all call.
+static int dr_x0 = 0, dr_y0 = 0, dr_x1 = 0, dr_y1 = 0;
+static int rects_overlap(int x,int y,int w,int h,int ox0,int oy0,int ox1,int oy1){
+    if(x+w<=ox0||ox1<=x||y+h<=oy0||oy1<=y) return 0; return 1;
+}
 void desktop_icons_draw(void){
     if(!fb_is_available()) return;
     for(int i=0;i<desktop_icon_count;i++){
         struct desktop_icon *ic = &desktop_icons[i];
         int ix = ic->x; int iy = ic->y;
+        // Skip icons outside the dirty region (label overflows the 64px box).
+        if(!rects_overlap(ix-16, iy, 96, 80, dr_x0, dr_y0, dr_x1, dr_y1)) continue;
         int gx = ix + (ICON_W - ICON_GLYPH)/2; int gy = iy + 4;
         if(i==0){ fb_draw_rect(gx, gy, ICON_GLYPH, ICON_GLYPH, ic->color); gfx_draw_rect_outline(gx, gy, ICON_GLYPH, ICON_GLYPH, 0x00000000); gfx_draw_string(gx+12, gy+12, "+", 0x00FFFFFF); }
         else if(i==1){ draw_taskmgr_icon(gx, gy); }
@@ -975,9 +986,12 @@ int desktop_icon_hit_test(int x, int y){
     return -1;
 }
 void desktop_icon_deselect_all(void){
+    // Dirty deselected icons' rects (fixes stale highlight with no full frame).
+    for(int i=0;i<desktop_icon_count;i++) if(desktop_icons[i].selected)
+        dirty_add(desktop_icons[i].x-16, desktop_icons[i].y, 96, 80);
     int had=0; for(int i=0;i<desktop_icon_count;i++) if(desktop_icons[i].selected) had=1;
     for(int i=0;i<desktop_icon_count;i++) desktop_icons[i].selected=0; selected_icon=-1;
-    if(had){ s_puts("DESKTOP: deselect all\n"); g_needs_redraw=1; }
+    if(had){ s_puts("DESKTOP: deselect all\n"); } // flag already set by dirty_add above
 }
 static int icon_streq(const char *a, const char *b){ int i=0; while(a[i] && b[i] && a[i]==b[i]) i++; return a[i]==0 && b[i]==0; }
 int desktop_icon_handle_click(int x, int y){
@@ -987,7 +1001,7 @@ int desktop_icon_handle_click(int x, int y){
         s_puts("DESKTOP: double-click icon "); s_put_dec(idx); s_puts("\n");
         for(int i=0;i<desktop_icon_count;i++) desktop_icons[i].selected = (i==idx); selected_icon = idx; last_click_icon = -1; last_click_tick = -1000;
         if(idx==0){ s_puts("DESKTOP: action New Window\n"); window_create_new(); }
-        else if(idx==1){ int found=-1; for(int i=0;i<window_count;i++) if(icon_streq(windows[i].title, "Task Manager")) { found=i; break; } if(found!=-1){ s_puts("DESKTOP: action Task Manager bring to front\n"); if(windows[found].minimized){ windows[found].minimized=0; s_puts("DESKTOP: unminimize Task Manager\n"); } window_bring_to_front(found); } else { s_puts("DESKTOP: action Task Manager create (was closed)\n"); if(window_count < MAX_WINDOWS){ int nid = window_count; windows[nid].x=600; windows[nid].y=100; windows[nid].w=300; windows[nid].h=200; w_strcpy(windows[nid].title, "Task Manager", 32); windows[nid].bg_color=0x00F0F0F0; windows[nid].title_color=0x00333333; windows[nid].border_color=0x00000000; windows[nid].visible=1; windows[nid].minimized=0; windows[nid].z=window_count; windows[nid].has_button=0; windows[nid].num_btns=0; windows[nid].has_textbox=0; windows[nid].has_calc=0; windows[nid].has_settings=0; windows[nid].task_counter=0; z_order[window_count]=nid; window_count++; for(int i=0;i<window_count;i++) windows[z_order[i]].z=i; s_puts("DESKTOP: created Task Manager\n"); g_needs_redraw=1; } else s_puts("DESKTOP: cannot create Task Manager - at max\n"); } }
+        else if(idx==1){ int found=-1; for(int i=0;i<window_count;i++) if(icon_streq(windows[i].title, "Task Manager")) { found=i; break; } if(found!=-1){ s_puts("DESKTOP: action Task Manager bring to front\n"); if(windows[found].minimized){ windows[found].minimized=0; s_puts("DESKTOP: unminimize Task Manager\n"); } window_bring_to_front(found); } else { s_puts("DESKTOP: action Task Manager create (was closed)\n"); if(window_count < MAX_WINDOWS){ int nid = window_count; windows[nid].x=600; windows[nid].y=100; windows[nid].w=300; windows[nid].h=200; w_strcpy(windows[nid].title, "Task Manager", 32); windows[nid].bg_color=0x00F0F0F0; windows[nid].title_color=0x00333333; windows[nid].border_color=0x00000000; windows[nid].visible=1; windows[nid].minimized=0; windows[nid].z=window_count; windows[nid].has_button=0; windows[nid].num_btns=0; windows[nid].has_textbox=0; windows[nid].has_calc=0; windows[nid].has_settings=0; windows[nid].task_counter=0; z_order[window_count]=nid; window_count++; for(int i=0;i<window_count;i++) windows[z_order[i]].z=i; s_puts("DESKTOP: created Task Manager\n"); window_invalidate(nid); } else s_puts("DESKTOP: cannot create Task Manager - at max\n"); } }
         else if(idx==2){ // Clicker
             int found=-1; for(int i=0;i<window_count;i++) if(icon_streq(windows[i].title, "Clicker")) { found=i; break; }
             if(found!=-1){ s_puts("DESKTOP: action Clicker bring to front\n"); if(windows[found].minimized){ windows[found].minimized=0; } window_bring_to_front(found); }
@@ -1011,7 +1025,7 @@ int desktop_icon_handle_click(int x, int y){
                     windows[nid].btns[0].x=20; windows[nid].btns[0].y=40; windows[nid].btns[0].w=120; windows[nid].btns[0].h=30; w_strcpy(windows[nid].btns[0].label, "Click Me", 32); windows[nid].btns[0].pressed=0; windows[nid].btns[0].clicks=0;
                     windows[nid].has_textbox=0; windows[nid].has_calc=0; windows[nid].has_settings=0; windows[nid].task_counter=0;
                     z_order[window_count]=nid; window_count++; for(int i=0;i<window_count;i++) windows[z_order[i]].z=i;
-                    s_puts("DESKTOP: created Clicker\n"); g_needs_redraw=1;
+                    s_puts("DESKTOP: created Clicker\n"); window_invalidate(nid);
                 } else s_puts("DESKTOP: cannot create Clicker - at max\n");
             }
         }
@@ -1036,7 +1050,7 @@ int desktop_icon_handle_click(int x, int y){
                     windows[nid].tbox.x=20; windows[nid].tbox.y=40; windows[nid].tbox.w=360; windows[nid].tbox.h=60; windows[nid].tbox.max_len=512; notes_restore_to(nid); // placeholder rect: layout_sync recomputes; session text (empty on fresh boot)
                     windows[nid].task_counter=0;
                     z_order[window_count]=nid; window_count++; for(int i=0;i<window_count;i++) windows[z_order[i]].z=i;
-                    s_puts("DESKTOP: created Notes\n"); g_needs_redraw=1;
+                    s_puts("DESKTOP: created Notes\n"); window_invalidate(nid);
                 } else s_puts("DESKTOP: cannot create Notes - at max\n");
             }
         }
@@ -1049,16 +1063,17 @@ int desktop_icon_handle_click(int x, int y){
                     int nid = window_count;
                     calculator_init_window(nid);
                     z_order[window_count]=nid; window_count++; for(int i=0;i<window_count;i++) windows[z_order[i]].z=i;
-                    s_puts("DESKTOP: created Calculator\n"); g_needs_redraw=1;
+                    s_puts("DESKTOP: created Calculator\n"); window_invalidate(nid);
                 } else s_puts("DESKTOP: cannot create Calculator - at max\n");
             }
         }
         else if(idx==5){ // Settings - window only, NO background task (purely reactive)
             settings_open_or_focus();
         }
-        g_needs_redraw=1; return 1;
+        // No flag: every create/bring sub-action above invalidates its own rect.
+        return 1;
     } else {
-        for(int i=0;i<desktop_icon_count;i++) desktop_icons[i].selected = (i==idx); selected_icon = idx; last_click_icon = idx; last_click_tick = now; s_puts("DESKTOP: select icon "); s_put_dec(idx); s_puts("\n"); g_needs_redraw=1; return 1;
+        for(int i=0;i<desktop_icon_count;i++) desktop_icons[i].selected = (i==idx); selected_icon = idx; last_click_icon = idx; last_click_tick = now; s_puts("DESKTOP: select icon "); s_put_dec(idx); s_puts("\n"); dirty_add(desktop_icons[idx].x-16, desktop_icons[idx].y, 96, 80); return 1;
     }
 }
 
@@ -1122,6 +1137,8 @@ void window_manager_init(void){
     s_puts("WM: created 2 windows (Clicker button, Notes textbox) + 6 desktop icons\n");
     // Build wallpaper cache once (draws Bliss then snapshots, measures flat vs Bliss vs blit)
     wallpaper_cache_build_once();
+    // Boot paints full screen directly (not via do_redraw): explicit full bounds.
+    dr_x0=0; dr_y0=0; dr_x1=(int)fb_get_width(); dr_y1=(int)fb_get_height();
     window_manager_draw_all();
     {
         int w = fb_get_width(); int h = fb_get_height(); int sky_h = h*60/100;
@@ -1227,7 +1244,7 @@ int window_create_new(void){
     for(int i=0;i<window_count;i++) windows[z_order[i]].z = i;
     s_puts("WM: created Window "); s_put_dec(idx+1); s_puts(" at "); s_put_dec(base_x); s_putc(','); s_put_dec(base_y);
     s_puts(" count now "); s_put_dec(window_count); s_puts("\n");
-    g_needs_redraw = 1;
+    window_invalidate(idx); // new window bounds (only new pixels + covered-behind)
     return idx;
 }
 
@@ -1442,7 +1459,7 @@ void wallpaper_rebuild(void){
     s_puts("WALLPAPER: rebuilt preset "); s_put_dec(wallpaper_preset);
     s_puts(" "); s_puts(wallpaper_preset_name(wallpaper_preset));
     s_puts(" cycles "); s_put_cycles(t1 - t0); s_puts("\n");
-    g_needs_redraw = 1;
+    dirty_all(); // whole screen changed: fall back to full repaint (rare path)
 }
 void wallpaper_set_preset(int p){
     if(p < 0 || p >= WALLPAPER_PRESET_COUNT) return; // invalid: ignore, keep current
@@ -1477,13 +1494,14 @@ void context_menu_open(int x, int y){
     if(ctx_y < 0) ctx_y = 0;
     ctx_open = 1;
     s_puts("CTX: open at "); s_put_dec(ctx_x); s_putc(','); s_put_dec(ctx_y); s_puts("\n");
-    g_needs_redraw = 1;
+    dirty_add(ctx_x, ctx_y, CTX_W, CTX_H);
 }
 void context_menu_close(void){
     if(!ctx_open) return;
+    // Dirty BEFORE clearing (rect fields survive, but capture-then-clear is the rule).
+    dirty_add(ctx_x, ctx_y, CTX_W, CTX_H);
     ctx_open = 0;
     s_puts("CTX: closed\n");
-    g_needs_redraw = 1;
 }
 int context_menu_is_open(void){ return ctx_open; }
 // Returns item index or -1. Same rects as draw (single source: CTX_* + ctx_x/y).
@@ -1523,12 +1541,51 @@ int context_menu_handle_rightclick(int x, int y){
     return 1;
 }
 
+// --- Dirty-rectangle tracking: single bounding union (not a region list).
+// Exclusive bounds; dirty_valid==0 means FULL SCREEN (initial state, and the
+// safety fallback for any flag raised without a rect: missed site = slower
+// full frame, never an artifact). dirty_add/all ALWAYS set g_needs_redraw;
+// callers never touch the flag directly.
+static int dirty_valid = 0;
+static int dirty_x0 = 0, dirty_y0 = 0, dirty_x1 = 0, dirty_y1 = 0;
+void dirty_add(int x, int y, int w, int h){
+    if(w <= 0 || h <= 0) return;
+    if(!fb_is_available()) return;
+    int fw = (int)fb_get_width(), fh = (int)fb_get_height();
+    if(fw <= 0 || fh <= 0) return;
+    int x0 = x < 0 ? 0 : x, y0 = y < 0 ? 0 : y;
+    int x1 = x + w > fw ? fw : x + w, y1 = y + h > fh ? fh : y + h;
+    if(x0 >= x1 || y0 >= y1) return; // fully off-screen: nothing
+    if(!dirty_valid){ dirty_x0=x0; dirty_y0=y0; dirty_x1=x1; dirty_y1=y1; dirty_valid=1; }
+    else { if(x0<dirty_x0)dirty_x0=x0; if(y0<dirty_y0)dirty_y0=y0; if(x1>dirty_x1)dirty_x1=x1; if(y1>dirty_y1)dirty_y1=y1; }
+    g_needs_redraw = 1;
+}
+void dirty_all(void){
+    if(!fb_is_available()){ g_needs_redraw = 1; return; }
+    dirty_x0=0; dirty_y0=0;
+    dirty_x1=(int)fb_get_width(); dirty_y1=(int)fb_get_height();
+    dirty_valid=1; g_needs_redraw=1;
+}
+void window_invalidate(int idx){
+    if(idx<0||idx>=window_count) return;
+    struct window *w=&windows[idx];
+    dirty_add(w->x, w->y, w->w, w->h);
+}
+void taskbar_clock_invalidate(void){
+    // Clock digits: right-aligned ending 10px left of "+", same geometry as draw.
+    int fw = (int)fb_get_width(), fh = (int)fb_get_height();
+    int cx = fw - 30 - 5 - 10 - 8*8;
+    dirty_add(cx-2, fh-TASKBAR_H+3+6-2, 8*8+4, 12);
+}
+
 void window_manager_draw_all(void){
     if(!fb_is_available()) return;
     uint64_t t_wall0=0, t_wall1=0;
     if(wallpaper_cache_ready){
         t_wall0 = rdtsc();
-        wallpaper_blit_cached();
+        // Region blit: only dirty rows/cols (per-frame wallpaper cost now
+        // scales with change size, not screen size).
+        fb_blit_region(wallpaper_cache, dr_x0, dr_y0, dr_x1-dr_x0, dr_y1-dr_y0);
         t_wall1 = rdtsc();
         last_wallpaper_cycles = t_wall1 - t_wall0;
     } else {
@@ -1539,15 +1596,25 @@ void window_manager_draw_all(void){
         s_puts("WALLPAPER: uncached draw cycles "); s_put_cycles(last_wallpaper_cycles); s_puts("\n");
     }
     // Desktop icons are part of desktop layer under windows (z-order: wallpaper -> icons -> windows -> taskbar)
+    // Skip icons outside the dirty region (label can overflow the 64px box).
     desktop_icons_draw();
     uint64_t t_win0 = rdtsc();
     for(int i=0;i<window_count;i++){
         int idx = z_order[i];
         if(windows[idx].minimized) continue;
+        // Skip windows that don't touch the dirty region: their front-buffer
+        // pixels are already correct from a previous frame.
+        if(!rects_overlap(windows[idx].x, windows[idx].y, windows[idx].w, windows[idx].h,
+                           dr_x0, dr_y0, dr_x1, dr_y1)) continue;
         window_draw_single(idx);
     }
-    taskbar_draw();
-    context_menu_draw(); // topmost layer (above taskbar)
+    // Taskbar spans the bottom 30px; skip unless dirty touches it. Clock ticks
+    // repaint only the clock rect (taskbar_draw runs, clipped to it).
+    if(rects_overlap(0, (int)fb_get_height()-TASKBAR_H, (int)fb_get_width(), TASKBAR_H,
+                      dr_x0, dr_y0, dr_x1, dr_y1))
+        taskbar_draw();
+    if(ctx_open && rects_overlap(ctx_x, ctx_y, CTX_W, CTX_H, dr_x0, dr_y0, dr_x1, dr_y1))
+        context_menu_draw(); // topmost layer (above taskbar)
     uint64_t t_win1 = rdtsc();
     last_windows_cycles = t_win1 - t_win0;
     s_puts("WM: drew windows back->front z=[");
@@ -1588,13 +1655,15 @@ int window_bring_to_front(int idx){
     s_puts("WM: bring window "); s_put_dec(idx+1); s_puts(" to front, new z=[");
     for(int i=0;i<window_count;i++){ s_put_dec(z_order[i]); if(i<window_count-1) s_putc(','); }
     s_puts("]\n");
-    g_needs_redraw = 1;
+    // Raised window's rect suffices: it repaints fully (was partially covered),
+    // and newly-covered parts of others need no paint (painted over in z-order).
+    window_invalidate(idx);
     return 1;
 }
 
 
 
-void window_set_needs_redraw(void){ g_needs_redraw = 1; }
+void window_set_needs_redraw(void){ dirty_all(); } // legacy entry: no rect known -> full (safe)
 int window_needs_redraw(void){ return g_needs_redraw; }
 void window_do_redraw(void){
     if(g_in_redraw){
@@ -1612,18 +1681,41 @@ void window_do_redraw(void){
     g_in_redraw = 1;
     uint64_t t0 = rdtsc();
     g_redraw_count++;
+    // Snapshot the dirty union (full screen if none recorded: safety fallback).
+    // Correctness model: back buffer is scratch; every frame recomposes the dirty
+    // region from wallpaper upward in z-order, so moved/uncovered areas repaint
+    // correctly as long as old+new positions were both unioned by invalidators.
+    int fw = (int)fb_get_width(), fh = (int)fb_get_height();
+    int dx0, dy0, dx1, dy1, was_full;
+    if(dirty_valid){ dx0=dirty_x0; dy0=dirty_y0; dx1=dirty_x1; dy1=dirty_y1; }
+    else { dx0=0; dy0=0; dx1=fw; dy1=fh; }
+    dirty_valid = 0;
+    was_full = (dx0<=0 && dy0<=0 && dx1>=fw && dy1>=fh);
+    // Cursor is deliberately NOT unioned into dirty: a static cursor far from the
+    // action would stretch every small region into a huge bounding box (measured:
+    // 68x12 clock tick + parked cursor = 917x529 repaint). Instead the cursor box
+    // is painted+swapped separately below; restore() first erases the old box in
+    // back (saved pixels are always fresh: every repaint path restores first).
+    dr_x0=dx0; dr_y0=dy0; dr_x1=dx1; dr_y1=dy1;
     mouse_cursor_restore();
     mouse_cursor_invalidate();
+    fb_set_clip(dx0, dy0, dx1-dx0, dy1-dy0);
     window_manager_draw_all();
+    fb_clear_clip();
     mouse_cursor_draw_current();
-    if(fb_is_double_buffered()) fb_swap();
+    if(fb_is_double_buffered()) fb_swap_region(dx0, dy0, dx1-dx0, dy1-dy0);
+    // Cursor box swaps separately (see above: never unioned into dirty).
+    { int ccx, ccy; mouse_get_position(&ccx, &ccy);
+      if(fb_is_double_buffered()) fb_swap_region(ccx, ccy, 16, 16); }
     uint64_t t1 = rdtsc();
     if((g_redraw_count % 10)==0){
         s_puts("WM_REDRAW #"); s_put_dec(g_redraw_count);
         s_puts(" cycles "); s_put_dec((uint32_t)(t1-t0));
         s_puts(" [wallpaper "); s_put_dec((uint32_t)last_wallpaper_cycles);
         s_puts(" win "); s_put_dec((uint32_t)last_windows_cycles);
-        s_puts("] PMM free "); s_put_dec(pmm_free_frames());
+        s_puts("] dirty "); s_put_dec((uint32_t)(dx1-dx0)); s_putc('x'); s_put_dec((uint32_t)(dy1-dy0));
+        if(was_full) s_puts(" FULL");
+        s_puts(" PMM free "); s_put_dec(pmm_free_frames());
         s_puts("\n");
     }
     // Log first few drags separately for lag diagnosis (always, not only %10)
@@ -1632,6 +1724,7 @@ void window_do_redraw(void){
         s_puts(" total "); s_put_dec((uint32_t)(t1-t0));
         s_puts(" wallpaper "); s_put_dec((uint32_t)last_wallpaper_cycles);
         s_puts(" windows "); s_put_dec((uint32_t)last_windows_cycles);
+        s_puts(" dirty "); s_put_dec((uint32_t)(dx1-dx0)); s_putc('x'); s_put_dec((uint32_t)(dy1-dy0));
         s_puts("\n");
     }
     g_in_redraw = 0;
@@ -1716,9 +1809,11 @@ void window_update_resize(int x, int y){
     if(new_w > max_w) new_w = max_w;
     if(new_h > max_h) new_h = max_h;
     if(new_w == w->w && new_h == w->h) return;
+    // Resize MUST dirty BOTH old and new extents (same ghost rule as drag).
+    dirty_add(w->x, w->y, w->w, w->h);
     w->w = new_w;
     w->h = new_h;
-    g_needs_redraw = 1;
+    dirty_add(w->x, w->y, w->w, w->h);
 }
 
 void window_end_resize(void){
@@ -1727,6 +1822,7 @@ void window_end_resize(void){
     s_puts(" now "); s_put_dec(windows[resize_win].w); s_putc('x'); s_put_dec(windows[resize_win].h); s_puts("\n");
     resizing = 0;
     resize_win = -1;
+    // No flag: every update already dirtied old+new extents.
 }
 
 int window_is_in_close_button(int idx, int x, int y){
@@ -1753,8 +1849,7 @@ int window_handle_taskmanager_kill_click(int x, int y){
             int widx = window_find_by_title(wtitle);
             s_puts("TASKMGR: Kill Task "); s_put_dec(tid); s_puts(" '"); s_puts(wtitle); s_puts("' window idx "); s_put_dec(widx); s_puts("\n");
             task_kill(tid);
-            if(widx != -1) window_close(widx);
-            g_needs_redraw = 1;
+            if(widx != -1) window_close(widx); // close() already invalidated bounds
             return 1;
         }
     }
@@ -1772,7 +1867,7 @@ int window_handle_minimize_click(int x, int y){
         w->minimized = 1;
         w->tbox.focused = 0; // unfocus textbox when minimized
         s_puts("WM: minimize Window "); s_put_dec(idx+1); s_puts("\n");
-        g_needs_redraw = 1;
+        window_invalidate(idx); // windows behind repaint the hole
         return 1;
     }
     return 0;
@@ -1790,6 +1885,9 @@ int window_handle_close_click(int x, int y){
 void window_close(int idx){
     if(idx<0||idx>=window_count) return;
     s_puts("WM: closing Window "); s_put_dec(idx+1); s_puts(" title "); s_puts(windows[idx].title); s_puts("\n");
+    // Invalidate BEFORE the array shift destroys the struct: windows behind
+    // repaint the hole from wallpaper upward in z-order on next redraw.
+    window_invalidate(idx);
     // Save title for app handling before shift (Clicker/Notes are apps that can be reopened via desktop icon, unlike generic "+" windows)
     char closed_title[32]; for(int i=0;i<32;i++) closed_title[i]=windows[idx].title[i];
     // If closed window was being dragged/resized, cancel
@@ -1871,7 +1969,7 @@ void window_close(int idx){
         if(killed) s_puts("WM: app Notes closed, task killed\n");
         else s_puts("WM: app Notes closed, task already not running\n");
     }
-    g_needs_redraw = 1;
+    // No flag here: bounds already invalidated at close entry (above).
 }
 int window_find_by_title(const char *title){
     for(int i=0;i<window_count;i++) if(icon_streq(windows[i].title, title)) return i;
@@ -1958,9 +2056,12 @@ void window_update_drag(int x, int y){
     if(new_y < min_y) new_y = min_y;
     if(new_y > max_y) new_y = max_y;
     if(new_x == w->x && new_y == w->y) return;
+    // Drag MUST dirty BOTH old (erase ghost via wallpaper+behind repaint)
+    // and new positions - missing either side means artifacts.
+    dirty_add(w->x, w->y, w->w, w->h);
     w->x = new_x;
     w->y = new_y;
-    g_needs_redraw = 1;
+    dirty_add(w->x, w->y, w->w, w->h);
 }
 
 
@@ -1969,6 +2070,7 @@ void window_end_drag(void){
     s_puts("WM: drag end Window "); s_put_dec(drag_win+1); s_puts("\n");
     dragging = 0;
     drag_win = -1;
+    // No flag: every update already dirtied old+new; end changes nothing visual.
 }
 
 // --- Phase 12: button (multi-button since Calculator) ---
@@ -2006,7 +2108,7 @@ int window_handle_button_down(int x, int y){
         s_puts("]\n");
     }
     w->btns[b].pressed = 1;
-    g_needs_redraw = 1;
+    window_invalidate(idx); // covers inline bring-to-front + pressed shading
     s_puts("BTN: down Window "); s_put_dec(idx+1); s_puts(" btn "); s_put_dec(b); s_puts(" pressed\n");
     return 1;
 }
@@ -2052,7 +2154,7 @@ int window_handle_button_up(int x, int y){
     } else {
         s_puts("BTN: release outside Window "); s_put_dec(pressed_idx+1); s_puts("\n");
     }
-    g_needs_redraw = 1;
+    window_invalidate(pressed_idx); // shading/label/display changes live inside this window
     return 1;
 }
 
@@ -2069,11 +2171,11 @@ static int textbox_hit_test(int win_idx, int x, int y){
 int window_handle_textbox_click(int x, int y){
     int idx = window_find_at(x,y);
     if(idx==-1) {
-        // click on desktop -> unfocus all
+        // click on desktop -> unfocus all (dirty each focused window first)
         int had=0;
-        for(int i=0;i<window_count;i++) if(windows[i].has_textbox && windows[i].tbox.focused) had=1;
+        for(int i=0;i<window_count;i++) if(windows[i].has_textbox && windows[i].tbox.focused){ window_invalidate(i); had=1; }
         for(int i=0;i<window_count;i++) if(windows[i].has_textbox) windows[i].tbox.focused=0;
-        if(had){ s_puts("TBOX: unfocus all (desktop)\n"); g_needs_redraw=1; }
+        if(had){ s_puts("TBOX: unfocus all (desktop)\n"); }
         return 0;
     }
     // check if click inside textbox of that window
@@ -2081,9 +2183,9 @@ int window_handle_textbox_click(int x, int y){
         // click inside window but outside textbox -> unfocus this window's textbox if it was focused? Keep focus only if click inside textbox
         // For Phase 12, clicking elsewhere in window should unfocus textbox (only one focused at a time)
         int had_focus = 0;
-        for(int i=0;i<window_count;i++) if(windows[i].has_textbox && windows[i].tbox.focused) had_focus=1;
+        for(int i=0;i<window_count;i++) if(windows[i].has_textbox && windows[i].tbox.focused){ window_invalidate(i); had_focus=1; }
         for(int i=0;i<window_count;i++) if(windows[i].has_textbox) windows[i].tbox.focused=0;
-        if(had_focus){ s_puts("TBOX: click outside textbox, unfocus\n"); g_needs_redraw=1; }
+        if(had_focus){ s_puts("TBOX: click outside textbox, unfocus\n"); }
         return 0;
     }
     // hit textbox - focus this, unfocus others
@@ -2098,7 +2200,7 @@ int window_handle_textbox_click(int x, int y){
         z_order[window_count-1]=idx;
         for(int i=0;i<window_count;i++) windows[z_order[i]].z=i;
     }
-    g_needs_redraw=1;
+    window_invalidate(idx); // focus border + inline bring
     return 1;
 }
 
@@ -2109,7 +2211,7 @@ void window_handle_key(char c){
     if(fidx==-1) return;
     struct textbox *tb=&windows[fidx].tbox;
     if(c=='\b'){
-        if(tb->len>0){ tb->len--; tb->buffer[tb->len]=0; s_puts("TBOX: backspace len "); s_put_dec(tb->len); s_puts("\n"); g_needs_redraw=1; }
+        if(tb->len>0){ tb->len--; tb->buffer[tb->len]=0; s_puts("TBOX: backspace len "); s_put_dec(tb->len); s_puts("\n"); window_invalidate(fidx); }
         return;
     }
     if(c=='\n' || c=='\r') return;
@@ -2117,7 +2219,7 @@ void window_handle_key(char c){
     tb->buffer[tb->len++]=c;
     tb->buffer[tb->len]=0;
     s_puts("TBOX: typed '"); s_putc(c); s_puts("' len "); s_put_dec(tb->len); s_puts(" Window "); s_put_dec(fidx+1); s_puts("\n");
-    g_needs_redraw=1;
+    window_invalidate(fidx);
 }
 
 void window_handle_backspace(void){
@@ -2136,7 +2238,7 @@ void window_tick_cursor(void){
         if(windows[i].tbox.blink_counter >= 20){
             windows[i].tbox.blink_counter=0;
             windows[i].tbox.cursor_visible ^= 1;
-            g_needs_redraw=1;
+            window_invalidate(i); // cursor pixel change only, but window-granular is fine
         }
     }
 }

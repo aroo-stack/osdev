@@ -15,6 +15,15 @@ static uint8_t fb_type = 0;
 static int fb_available = 0;
 static int double_buffered = 0;
 static uint32_t fb_size_bytes = 0;
+// Dirty-rect clip (exclusive upper bounds). Off = screen-bounds-only behavior.
+static int clip_on = 0;
+static int clip_x0 = 0, clip_y0 = 0, clip_x1 = 0, clip_y1 = 0;
+void fb_set_clip(int x, int y, int w, int h){
+    if(w <= 0 || h <= 0){ clip_on = 0; return; }
+    clip_x0 = x; clip_y0 = y; clip_x1 = x + w; clip_y1 = y + h;
+    clip_on = 1;
+}
+void fb_clear_clip(void){ clip_on = 0; }
 
 static inline void outb(uint16_t port, uint8_t v){ __asm__ volatile("outb %0,%1"::"a"(v),"Nd"(port));}
 static inline uint8_t inb(uint16_t port){ uint8_t r; __asm__ volatile("inb %1,%0":"=a"(r):"Nd"(port)); return r;}
@@ -139,6 +148,8 @@ int fb_init(struct multiboot_info *mbi){
 void fb_put_pixel(uint32_t x, uint32_t y, uint32_t color){
     if(!fb_available) return;
     if(x >= fb_width || y >= fb_height) return;
+    // Dirty-rect clip: intersect with caller-set region (screen clip above first).
+    if(clip_on && ((int)x < clip_x0 || (int)x >= clip_x1 || (int)y < clip_y0 || (int)y >= clip_y1)) return;
     uint32_t *target = fb_target ? fb_target : fb_front;
     uint8_t *row = (uint8_t*)target + y * fb_pitch;
     uint32_t *pixel = (uint32_t*)(row + x*4);
@@ -171,6 +182,14 @@ void fb_draw_rect(uint32_t x, uint32_t y, uint32_t w, uint32_t h, uint32_t color
     if(x >= fb_width || y >= fb_height) return;
     if(x + w > fb_width) w = fb_width - x;
     if(y + h > fb_height) h = fb_height - y;
+    // Intersect with dirty-rect clip (exclusive bounds; empty -> nothing).
+    if(clip_on){
+        if((int)x < clip_x0){ uint32_t d=(uint32_t)(clip_x0-(int)x); if(d>=w) return; x+=d; w-=d; }
+        if((int)y < clip_y0){ uint32_t d=(uint32_t)(clip_y0-(int)y); if(d>=h) return; y+=d; h-=d; }
+        if((int)(x+w) > clip_x1){ if((int)x >= clip_x1) return; w = (uint32_t)(clip_x1-(int)x); }
+        if((int)(y+h) > clip_y1){ if((int)y >= clip_y1) return; h = (uint32_t)(clip_y1-(int)y); }
+        if(w==0 || h==0) return;
+    }
     for(uint32_t dy=0; dy<h; dy++){
         uint8_t *row = (uint8_t*)target + (y+dy) * fb_pitch;
         uint32_t *pixels = (uint32_t*)(row + x*4);
@@ -212,6 +231,26 @@ void fb_blit_from(uint32_t *src){
     uint32_t dwords = fb_size_bytes / 4;
     __asm__ volatile("cld; rep movsl" : "+S"(src), "+D"(dst), "+c"(dwords) : : "memory");
 }
+// Partial blit: src rows [y,y+h), columns [x,x+w) -> back buffer.
+// Same row-major layout as full blit, per-row rep movsl segments.
+void fb_blit_region(uint32_t *src, int x, int y, int w, int h){
+    if(!fb_available || !double_buffered || !fb_back || !src) return;
+    if(w <= 0 || h <= 0) return;
+    int fw = (int)fb_width, fh = (int)fb_height;
+    if(x < 0){ w += x; x = 0; } if(y < 0){ h += y; y = 0; }
+    if(x >= fw || y >= fh) return;
+    if(x + w > fw) w = fw - x; if(y + h > fh) h = fh - y;
+    if(w <= 0 || h <= 0) return;
+    // Row stride from pitch (== width*4 on our modes, but pitch-correct anyway;
+    // cache mirrors back-buffer layout via the linear snapshot, so same stride).
+    uint32_t stride_dw = fb_pitch / 4;
+    for(int r=0; r<h; r++){
+        uint32_t *s = src + (uint32_t)(y+r) * stride_dw + (uint32_t)x;
+        uint32_t *d = fb_back + (uint32_t)(y+r) * stride_dw + (uint32_t)x;
+        uint32_t dwords = (uint32_t)w;
+        __asm__ volatile("cld; rep movsl" : "+S"(s), "+D"(d), "+c"(dwords) : : "memory");
+    }
+}
 
 // Known limitation: no hardware vsync/page-flip support, so occasional screen tearing (a thin visible line)
 // can appear at the display's refresh boundary during redraws. Attempted 0x3DA vblank polling did not reliably
@@ -246,6 +285,28 @@ void fb_swap(void){
         :
         : "memory"
     );
+    uint64_t t1 = rdtsc();
+    last_swap_cycles = t1 - t0;
+}
+// Partial swap: back rows [y,y+h), columns [x,x+w) -> front. Same vblank wait
+// and timing accounting as full swap (last_swap_cycles now measures the region).
+void fb_swap_region(int x, int y, int w, int h){
+    if(!fb_available || !double_buffered || !fb_back || !fb_front) return;
+    if(w <= 0 || h <= 0) return;
+    int fw = (int)fb_width, fh = (int)fb_height;
+    if(x < 0){ w += x; x = 0; } if(y < 0){ h += y; y = 0; }
+    if(x >= fw || y >= fh) return;
+    if(x + w > fw) w = fw - x; if(y + h > fh) h = fh - y;
+    if(w <= 0 || h <= 0) return;
+    wait_for_vblank();
+    uint64_t t0 = rdtsc();
+    uint32_t stride_dw = fb_pitch / 4;
+    for(int r=0; r<h; r++){
+        uint32_t *src = fb_back + (uint32_t)(y+r) * stride_dw + (uint32_t)x;
+        uint32_t *dst = fb_front + (uint32_t)(y+r) * stride_dw + (uint32_t)x;
+        uint32_t dwords = (uint32_t)w;
+        __asm__ volatile("cld; rep movsl" : "+S"(src), "+D"(dst), "+c"(dwords) : : "memory");
+    }
     uint64_t t1 = rdtsc();
     last_swap_cycles = t1 - t0;
 }

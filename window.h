@@ -126,6 +126,12 @@ int window_is_in_title_bar(int idx, int x, int y);
 void window_set_needs_redraw(void);
 int window_needs_redraw(void);
 void window_do_redraw(void);
+// dirty-rectangle: invalidators union regions; next redraw paints only the
+// union (wallpaper/windows/swap clipped+skipped). dirty_add/all set the flag.
+void dirty_add(int x, int y, int w, int h);
+void dirty_all(void);
+void window_invalidate(int idx); // union window bounds (validated)
+void taskbar_clock_invalidate(void); // union clock digit area
 extern volatile int g_needs_redraw;
 extern volatile int g_in_redraw;
 // button - Phase 12
