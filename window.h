@@ -65,6 +65,10 @@ extern struct window windows[];
 extern int window_count;
 extern int z_order[];
 
+// taskbar clock: RTC seed (seconds since midnight, host/UTC as-is, no tz conv)
+// read once at boot; PIT ticks advance it from there. -1/unset -> 00:00:00.
+void clock_set_base_seconds(int s);
+int clock_current_seconds(void); // (base + pit_get_ticks()/100) % 86400
 // wallpaper presets - session global for a future Settings app:
 // read via wallpaper_preset, change ONLY via wallpaper_set_preset/cycle
 // (setter validates + rebuilds cache + redraws). 0=Day 1=Sunset 2=Night.

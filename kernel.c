@@ -325,6 +325,20 @@ void kernel_main(uint32_t magic, uint32_t mbi_addr) {
         for(int i=7;i>=0;i--) { char c = ((nm>>i)&1)?'1':'0'; while(!(inb(0x3F8+5)&0x20)); outb(0x3F8,c); }
         serial_puts("\n");
     }
+    // Seed taskbar clock from CMOS RTC once (PIT just inited, elapsed ~0).
+    // Host/UTC as-is, no timezone conversion. -1 (insane RTC) -> 00:00:00 base.
+    {
+        extern int rtc_read_seconds_of_day(void);
+        int rtc_sec = rtc_read_seconds_of_day();
+        clock_set_base_seconds(rtc_sec);
+        serial_puts("RTC: seed ");
+        { int t = (rtc_sec < 0) ? 0 : rtc_sec;
+          serial_putc((char)('0'+((t/3600)/10)%10)); serial_putc((char)('0'+(t/3600)%10)); serial_putc(':');
+          serial_putc((char)('0'+(((t/60)%60)/10)%10)); serial_putc((char)('0'+(t/60)%60%10)); serial_putc(':');
+          serial_putc((char)('0'+((t%60)/10)%10)); serial_putc((char)('0'+t%60%10));
+          if(rtc_sec < 0) serial_puts(" (RTC insane, fell back to 00:00:00)"); }
+        serial_puts("\n");
+    }
     task_init();
     task_create(task_clicker_entry, "Clicker");
     task_create(task_notes_entry, "Notes");

@@ -558,6 +558,17 @@ static void window_draw_single(int idx){
     }
 }
 
+// Taskbar clock base: RTC seconds-since-midnight, seeded once at boot
+// (host/UTC as-is, no timezone conversion). PIT ticks advance from there;
+// never re-read (RTC read is boot-only). Unset/negative -> 00:00:00 base.
+static int clock_base_sec = 0;
+void clock_set_base_seconds(int s){
+    clock_base_sec = (s < 0) ? 0 : s;
+}
+int clock_current_seconds(void){
+    // % 86400 wraps past midnight; int % is a single DIV, no libgcc needed.
+    return (clock_base_sec + pit_get_ticks() / 100) % 86400;
+}
 void taskbar_draw(void){
     if(!fb_is_available()) return;
     int fb_h = fb_get_height();
@@ -604,13 +615,13 @@ void taskbar_draw(void){
             gfx_draw_string(plus_x+11, plus_y+6, "+", 0x00888888);
         }
     }
-    // Elapsed-since-boot clock (no RTC driver): HH:MM:SS from 100Hz PIT ticks.
+    // Taskbar clock: HH:MM:SS from RTC seed + PIT advance (see clock_base_sec).
     // ticks/100 = seconds; two digits each with leading zeros ("02:07:05").
     // Right-aligned ending 10px left of "+": 8 chars x 8px = 64px wide.
     // No overlap by construction: 8 tabs max end at 5+8*155-5=1240, clock starts
     // ~1811 at 1920 wide; "+" hit-test starts at plus_x, 10px right of clock end.
     {
-        int total = pit_get_ticks() / 100; // seconds since boot
+        int total = clock_current_seconds(); // RTC seed + PIT advance, wraps at midnight
         int ss = total % 60, mm = (total / 60) % 60, hh = total / 3600;
         char clk[9];
         clk[0]=(char)('0'+(hh/10)%10); clk[1]=(char)('0'+hh%10); clk[2]=':';
