@@ -547,6 +547,21 @@ void taskbar_draw(void){
             gfx_draw_string(plus_x+11, plus_y+6, "+", 0x00888888);
         }
     }
+    // Elapsed-since-boot clock (no RTC driver): HH:MM:SS from 100Hz PIT ticks.
+    // ticks/100 = seconds; two digits each with leading zeros ("02:07:05").
+    // Right-aligned ending 10px left of "+": 8 chars x 8px = 64px wide.
+    // No overlap by construction: 8 tabs max end at 5+8*155-5=1240, clock starts
+    // ~1811 at 1920 wide; "+" hit-test starts at plus_x, 10px right of clock end.
+    {
+        int total = pit_get_ticks() / 100; // seconds since boot
+        int ss = total % 60, mm = (total / 60) % 60, hh = total / 3600;
+        char clk[9];
+        clk[0]=(char)('0'+(hh/10)%10); clk[1]=(char)('0'+hh%10); clk[2]=':';
+        clk[3]=(char)('0'+(mm/10)%10); clk[4]=(char)('0'+mm%10); clk[5]=':';
+        clk[6]=(char)('0'+(ss/10)%10); clk[7]=(char)('0'+ss%10); clk[8]=0;
+        int plus_x = fb_w - 30 - 5;
+        gfx_draw_string(plus_x - 10 - 8*8, ty + 3 + 6, clk, 0x00FFFFFF);
+    }
 }
 
 // --- Desktop icons (Bliss wallpaper layer, under windows) ---

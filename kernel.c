@@ -351,8 +351,13 @@ void kernel_main(uint32_t magic, uint32_t mbi_addr) {
     // Main loop - GUI task 0
     int gui_tick = 0;
     int taskman_tick = 0;
+    int last_clk_sec = -1; // taskbar clock 1Hz gate (elapsed seconds last drawn)
     for (;;) {
         window_tick_cursor();
+        // Taskbar clock: redraw once per second (when displayed second changes),
+        // not every frame - same deferred-redraw pattern as everything else.
+        { int clk_sec = pit_get_ticks() / 100;
+          if(clk_sec != last_clk_sec){ last_clk_sec = clk_sec; g_needs_redraw = 1; } }
         // Task Manager live refresh - every ~20 iterations (~0.5s) to update tick counts without constant redraw
         // Chosen over every loop (60Hz full redraw = 180MB/s) to keep responsiveness, vs every second would be too laggy to watch counts climb
         // Dynamic: find Task Manager by title, not hardcoded index 3 / count 4 (now boots with 2 windows)
