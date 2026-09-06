@@ -104,6 +104,35 @@ void gfx_draw_string(int x, int y, const char *s, uint32_t color){
     }
 }
 
+// Scaled text: same 8x8 bitmap font, each set pixel drawn as scale*scale rect.
+// Integer multiples only (2x, 3x...) - no new font data, no blending, edges stay
+// crisp. Used by the Calculator display; nothing else changes size.
+void gfx_draw_char_scaled(int x, int y, char c, uint32_t color, int scale){
+    if(scale <= 1){ gfx_draw_char(x, y, c, color); return; } // identical fast path
+    unsigned char uc = (unsigned char)c;
+    if(uc >= 128) return;
+    const uint8_t *glyph = font8x8[uc];
+    for(int row=0; row<8; row++){
+        uint8_t bits = glyph[row];
+        for(int col=0; col<8; col++){
+            if(bits & (1 << col)){ // same LSB-leftmost encoding as gfx_draw_char
+                fb_draw_rect(x+col*scale, y+row*scale, scale, scale, color);
+            }
+        }
+    }
+}
+
+void gfx_draw_string_scaled(int x, int y, const char *s, uint32_t color, int scale){
+    int cx = x;
+    int adv = 8*scale;
+    if(adv < 8) adv = 8;
+    while(*s){
+        gfx_draw_char_scaled(cx, y, *s, color, scale);
+        cx += adv;
+        s++;
+    }
+}
+
 void gfx_draw_string_bg(int x, int y, const char *s, uint32_t fg, uint32_t bg){
     int cx = x;
     while(*s){

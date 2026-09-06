@@ -8,4 +8,6 @@ void gfx_draw_filled_circle(int cx, int cy, int r, uint32_t color);
 void gfx_draw_char(int x, int y, char c, uint32_t color);
 void gfx_draw_string(int x, int y, const char *s, uint32_t color);
 void gfx_draw_string_bg(int x, int y, const char *s, uint32_t fg, uint32_t bg);
+void gfx_draw_char_scaled(int x, int y, char c, uint32_t color, int scale); // integer pixel-doubling for large display text
+void gfx_draw_string_scaled(int x, int y, const char *s, uint32_t color, int scale);
 #endif

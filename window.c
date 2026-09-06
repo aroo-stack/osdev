@@ -239,9 +239,9 @@ int textbox_word_count(struct textbox *tb){
 // redrawing nothing. Task Manager lists tids 1-2 only, so Calculator is
 // correctly absent there - it shows tasks, not windows.
 // Geometry (default window 304x264): display at (20,30), width stretches as
-// W-40; grid origin (20,76), buttons 60x36, gap 8 -> col x=20+c*68, row
-// y=76+r*44 at default size; layout_sync_window recomputes from CURRENT w/h
-// on every redraw (bottom margin 20: grid bottom 244 at default height 264).
+// W-40 and height as calc_display_h; grid origin (20, y0=calc_grid_y0(dh)),
+// buttons 60x36, gap 8 at default size; layout_sync_window recomputes from
+// CURRENT w/h on every redraw (bottom margin 20).
 static void calculator_init_window(int nid){
     struct window *w = &windows[nid];
     static const char *labels[4][4] = {{"7","8","9","/"},{"4","5","6","*"},{"1","2","3","-"},{"0","C","=","+"}};
@@ -337,27 +337,42 @@ static void calculator_handle_button(struct window *w, int b){
     s_puts("CALC: btn "); s_puts(w->btns[b].label); s_puts(" display "); s_puts(c->display); s_puts("\n");
 }
 
+// Calculator display sizing: box height grows with window (H*10/100 in
+// [30,72]); digit scale is an integer multiple of the 8px base font so text
+// visibly grows: scale=(dh-8)/16 in [1,4] -> dh=30:scale1, dh=40:scale2,
+// dh=56:scale3. Grid top follows display bottom + 16.
+// Trace default 264x304: dh=30, scale=1, y0=76, bw=60, bh=36 (unchanged).
+// Trace 500x400: dh=40, scale=2 (16px digits), y0=86, bh=(400-40-90)/4=67.
+static int calc_display_h(int wh){ int dh = wh*10/100; if(dh < 30) dh = 30; if(dh > 72) dh = 72; return dh; }
+static int calc_display_scale(int dh){ int s = (dh-8)/16; if(s < 1) s = 1; if(s > 4) s = 4; return s; }
+static int calc_grid_y0(int dh){ return 30 + dh + 16; }
+
 // Responsive layout: recompute AND STORE every widget rect from the window's
 // CURRENT w/h at the start of every redraw. Hit-testing reads these same stored
 // rects, so visuals and hit-test share one source of truth and cannot drift.
 // (Between a resize and the next redraw, hit-test uses pre-resize rects - which
 // still match the pre-resize pixels on screen. That is the correct invariant.)
 // Math (traced):
-// - Calculator (W x H, 4x4 grid, gap 8, sides 20, grid top 76, bottom margin 20):
-//   bw=(W-64)/4, bh=(H-120)/4. At default 304x264: 60x36 at 20+c*68, 76+r*44.
+// - Calculator (W x H, 4x4 grid, gap 8, sides 20, bottom margin 20):
+//   bw=(W-64)/4, grid top y0=calc_grid_y0(dh), bh=(H-y0-44)/4.
+//   At default 304x264: 60x36 at 20+c*68, 76+r*44.
 // - Clicker (single button, proportional + centered): bw=W*30/100 in [120,320],
 //   bh=H*10/100 in [30,64], x=(W-bw)/2, y=(H-bh)/2. At 400x300: 120x30@(140,135).
-// - Notes (textbox): x=20, y=40, w=W-40, h=H-80 (20 side margins, 40 top for
-//   title+pad, bottom leaves 20 margin + 12 labels + 8 gap). At 400x300: 360x220.
+// - Notes (textbox): x=20, y=40, w=W-40; height YIELDS to the bottom-anchored
+//   label row (labels at H-32): h = (H-32)-8-40 = H-80. At 400x300: 360x220.
+//   Direction matters: labels anchor to the window bottom, textbox fills what
+//   remains - so label visibility can never depend on textbox growth.
 static void layout_sync_window(struct window *w){
     if(w->has_calc){
+        int dh = calc_display_h(w->h);
+        int y0 = calc_grid_y0(dh);
         int bw = (w->w - 64)/4; if(bw < 40) bw = 40;
-        int bh = (w->h - 120)/4; if(bh < 24) bh = 24;
+        int bh = (w->h - y0 - 44)/4; if(bh < 24) bh = 24;
         int n = w->num_btns; if(n > MAX_BTNS) n = MAX_BTNS;
         for(int b=0;b<n;b++){
             int c = b%4, r = b/4;
             w->btns[b].x = 20 + c*(bw+8);
-            w->btns[b].y = 76 + r*(bh+8);
+            w->btns[b].y = y0 + r*(bh+8);
             w->btns[b].w = bw; w->btns[b].h = bh;
         }
     } else if(w->has_button){
@@ -368,9 +383,12 @@ static void layout_sync_window(struct window *w){
         w->btns[0].w = bw; w->btns[0].h = bh;
     }
     if(w->has_textbox){
+        // Bottom-anchored labels first: 12px label row 20px above window bottom.
+        // Textbox yields to it (h = labels_y - 8 gap - 40 top), never the reverse.
+        int labels_y = w->h - 32;
         w->tbox.x = 20; w->tbox.y = 40;
         w->tbox.w = w->w - 40; if(w->tbox.w < 80) w->tbox.w = 80;
-        w->tbox.h = w->h - 80; if(w->tbox.h < 40) w->tbox.h = 40;
+        w->tbox.h = labels_y - 8 - w->tbox.y; if(w->tbox.h < 40) w->tbox.h = 40;
     }
 }
 
@@ -410,16 +428,17 @@ static void window_draw_single(int idx){
         // and restored on reopen, until reboot (BSS buffer, no disk).
         gfx_draw_string(wx + 130, wy, "autosaved (session)", 0x00000000);
     }
-    // Calculator display: white box at window-relative (20,30), width stretches
-    // as W-40 (layout_sync owns buttons; display needs no hit-test, drawn live).
-    // Right-aligned text ("0", "10", "-5", "Error").
+    // Calculator display: white box at window-relative (20,30); width stretches
+    // as W-40, height grows as calc_display_h (30 at default); digits render at
+    // integer scale via gfx_draw_string_scaled, right-aligned + vertically centered.
     if(w->has_calc){
-        int dx = w->x + 20, dy = w->y + 30, dw = w->w - 40, dh = 30;
+        int dx = w->x + 20, dy = w->y + 30, dw = w->w - 40, dh = calc_display_h(w->h);
         if(dw < 80) dw = 80;
         fb_draw_rect(dx, dy, dw, dh, 0x00FFFFFF);
         gfx_draw_rect_outline(dx, dy, dw, dh, 0x00000000);
         int dlen = 0; while(w->calc.display[dlen] && dlen < 32) dlen++;
-        gfx_draw_string(dx + dw - 4 - dlen*8, dy + (dh-8)/2, w->calc.display, 0x00000000);
+        int sc = calc_display_scale(dh);
+        gfx_draw_string_scaled(dx + dw - 4 - dlen*8*sc, dy + (dh-8*sc)/2, w->calc.display, 0x00000000, sc);
     }
     if(w->title[0]=='T' && w->title[1]=='a' && w->title[5]=='M'){
         extern void pit_get_task_ticks(int *gui, int *a, int *b);
@@ -1579,7 +1598,12 @@ void window_update_drag(int x, int y){
     int min_x = -w->w + 60;
     int max_x = (int)fb_get_width() - 60;
     int min_y = 0;
-    int max_y = (int)fb_get_height() - TITLE_BAR_H;
+    // Bottom of window (Notes labels, resize handle) must never slide under the
+    // taskbar: those live ~20-32px above the window bottom, so they are the first
+    // things swallowed when a tall window is dragged down. If the window is taller
+    // than the space above the taskbar, pin top (keeps title bar grabbable).
+    int max_y = (int)fb_get_height() - TASKBAR_H - w->h;
+    if(max_y < 0) max_y = 0;
     if(new_x < min_x) new_x = min_x;
     if(new_x > max_x) new_x = max_x;
     if(new_y < min_y) new_y = min_y;
