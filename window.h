@@ -65,6 +65,22 @@ extern struct window windows[];
 extern int window_count;
 extern int z_order[];
 
+// wallpaper presets - session global for a future Settings app:
+// read via wallpaper_preset, change ONLY via wallpaper_set_preset/cycle
+// (setter validates + rebuilds cache + redraws). 0=Day 1=Sunset 2=Night.
+#define WALLPAPER_PRESET_COUNT 3
+extern int wallpaper_preset;
+void wallpaper_set_preset(int p);
+void wallpaper_cycle_preset(void);
+const char *wallpaper_preset_name(int p);
+// desktop right-click context menu (empty desktop only)
+void context_menu_open(int x, int y);
+void context_menu_close(void);
+int context_menu_is_open(void);
+int context_menu_handle_click(int x, int y); // left-click: item action + close, or outside-close; 1 if menu was open
+int context_menu_handle_rightclick(int x, int y); // right-press: close if open, open if empty desktop
+void context_menu_draw(void); // drawn last (above taskbar)
+
 // desktop icons - part of desktop layer under windows
 struct desktop_icon {
     int x, y; // absolute desktop position (top-left of hit box)

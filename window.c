@@ -72,6 +72,26 @@ static uint32_t *wallpaper_cache = 0;
 static uint32_t wallpaper_cache_bytes = 0;
 static uint32_t wallpaper_cache_pages = 0;
 static int wallpaper_cache_ready = 0;
+// Wallpaper preset - session-persistent global (BSS zero = Day at boot).
+// Future Settings app contract: read wallpaper_preset directly, change ONLY
+// via wallpaper_set_preset()/wallpaper_cycle_preset() (validate + rebuild +
+// redraw). Same geometry for all presets, different palettes - cheap to
+// generate procedurally, no new assets.
+int wallpaper_preset = 0;
+struct wallpaper_palette {
+    const char *name;
+    uint32_t sky_top, sky_bot; // gradient + horizon fill
+    uint32_t sun_outer, sun_inner; // sun (Day/Sunset) or moon (Night)
+    int sun_r_outer, sun_r_inner;
+    int sun_near_horizon; // 0: y=120 (high), 1: y=sky_h+30 (low, sunset)
+    uint32_t far_green, near_green;
+    uint32_t cloud;
+};
+static const struct wallpaper_palette wallpaper_palettes[WALLPAPER_PRESET_COUNT] = {
+    {"Day", 0x0087CEEB,0x00B0E0E6, 0x00FFFFE0,0x00FFFFFF, 40,35,0, 0x0090C060,0x0030A030, 0x00FFFFFF},
+    {"Sunset", 0x003B2E6E,0x00FF8C42, 0x00FF5A2A,0x00FFD166, 48,40,1, 0x006B4E71,0x002E4038, 0x00FFB59E},
+    {"Night", 0x00050914,0x000B1D3A, 0x00E8EDF2,0x00FFFFFF, 30,24,0, 0x000E2A1A,0x0005130C, 0x003A4A63},
+};
 static uint64_t wallpaper_build_cycles = 0; // cycles to build once
 static uint64_t last_wallpaper_cycles = 0; // per-frame wallpaper cost (recompute or blit)
 static uint64_t last_windows_cycles = 0;
@@ -1125,10 +1145,14 @@ static void draw_bliss_wallpaper(void){
     int h = fb_get_height();
     int sky_h = h * 60 / 100; // upper 60% sky
     int hill_base = sky_h; // hills start at 60% from top
-    // Sky gradient - brighter blue top (0x0087CEEB sky blue) to pale near horizon (0x00B0E0E6 powder blue)
-    // Chose vertical per-row lerp: sky_h rows * w cols (e.g., 648*1920=1.2M at 1080p, 460*1024=471k at 768p), sky_h lerps
-    uint32_t sky_top = 0x0087CEEB;
-    uint32_t sky_bot = 0x00B0E0E6;
+    // Palette for current preset (guarded: preset is validated by setter,
+    // but a stray write must never index out of bounds here).
+    int pi = wallpaper_preset;
+    if(pi < 0 || pi >= WALLPAPER_PRESET_COUNT) pi = 0;
+    const struct wallpaper_palette *pal = &wallpaper_palettes[pi];
+    // Sky gradient - preset top/bottom colors, same vertical per-row lerp
+    uint32_t sky_top = pal->sky_top;
+    uint32_t sky_bot = pal->sky_bot;
     uint8_t top_r = (sky_top>>16)&0xFF, top_g=(sky_top>>8)&0xFF, top_b=sky_top&0xFF;
     uint8_t bot_r = (sky_bot>>16)&0xFF, bot_g=(sky_bot>>8)&0xFF, bot_b=sky_bot&0xFF;
     for(int y=0; y<sky_h; y++){
@@ -1141,21 +1165,21 @@ static void draw_bliss_wallpaper(void){
     }
     // Fill below horizon with sky bottom before hills - ensures no 35px black gap if hill_base+offset > sky_h
     // Without this, gap sky_h..far_y-1 remains untouched (black) when base>0
-    fb_draw_rect(0, sky_h, w, h - sky_h, 0x00B0E0E6); // sky_bot solid under hills
+    fb_draw_rect(0, sky_h, w, h - sky_h, pal->sky_bot); // sky_bot solid under hills
     // Hills will overwrite this sky_bot area from far_y/near_y down, leaving only visible hill silhouette
-    // Sun - filled pale yellow/white at upper right, dynamic for width (75% + 120y). At 1024x768 was 800,120; at 1920x1080 ~1696,120
+    // Sun (Day/Sunset) or moon (Night) - same geometry, palette colors/sizes
     int sun_x = w - 224; if(sun_x < 0) sun_x = w*3/4;
-    int sun_y = 120;
-    gfx_draw_filled_circle(sun_x, sun_y, 40, 0x00FFFFE0); // light yellow
-    gfx_draw_filled_circle(sun_x, sun_y, 35, 0x00FFFFFF); // white center for highlight
+    int sun_y = pal->sun_near_horizon ? sky_h + 30 : 120;
+    gfx_draw_filled_circle(sun_x, sun_y, pal->sun_r_outer, pal->sun_outer);
+    gfx_draw_filled_circle(sun_x, sun_y, pal->sun_r_inner, pal->sun_inner);
 
     // Hills - two gentle layers for depth, low frequency for wide rolling (Bliss has 2-3 broad curves, not sawtooth)
     // Trace addresses: hill_base = sky_h = h*60/100, sky GRAD filled y=0..sky_h-1, hills fill y=far_y..h-1
     // Previously period 128 (8 hills) and 85 (12 hills) => sawtooth. Now period scaled with width to keep visual: 600/400 at 1024 => 1.71/2.56 hills
     // At 1920, periods 1125/750 keep same 1.71/2.56 visual (1920/1125≈1.71). Phase = x*256/period &0xFF, hill_y = sky_h + baseOff + amp*sin/128
     // Address trace: fb at 0xFD000000, back 0x00600000, cache 0x00F00000, per-column 1x(h-y) writes w*~h*0.4 avg pixels, no overlap gap
-    uint32_t far_green = 0x0090C060; // lighter far
-    uint32_t near_green = 0x0030A030; // darker near - Bliss meadow
+    uint32_t far_green = pal->far_green; // lighter far layer
+    uint32_t near_green = pal->near_green; // darker near layer
     int far_period = w * 600 / 1024; if(far_period < 1) far_period = 1;
     int near_period = w * 400 / 1024; if(near_period < 1) near_period = 1;
     for(int x=0; x<w; x++){
@@ -1174,19 +1198,20 @@ static void draw_bliss_wallpaper(void){
         fb_draw_rect(x, far_y, 1, h - far_y, far_green);
         fb_draw_rect(x, near_y, 1, h - near_y, near_green);
     }
-    // Clouds - 3 clusters of 3-4 overlapping white circles, cheap, in sky area (y < sky_h) - x scaled with width
+    // Clouds - 3 clusters of 3-4 overlapping circles, palette-tinted, cheap,
+    // in sky area (y < sky_h) - x scaled with width
     // Original at 1024: cluster1 180,80 etc., cluster2 500,100, cluster3 850,90. At 1920 scaled ~1.875x keeps similar visual spread.
-    int cx1 = w * 180 / 1024; gfx_draw_filled_circle(cx1, 80, 28, 0x00FFFFFF);
-    gfx_draw_filled_circle(w * 210 / 1024, 70, 22, 0x00FFFFFF);
-    gfx_draw_filled_circle(w * 240 / 1024, 85, 18, 0x00FFFFFF);
-    gfx_draw_filled_circle(w * 160 / 1024, 90, 15, 0x00FFFFFF);
-    int cx2 = w * 500 / 1024; gfx_draw_filled_circle(cx2, 100, 30, 0x00FFFFFF);
-    gfx_draw_filled_circle(w * 530 / 1024, 85, 20, 0x00FFFFFF);
-    gfx_draw_filled_circle(w * 470 / 1024, 95, 18, 0x00FFFFFF);
-    gfx_draw_filled_circle(w * 550 / 1024, 105, 14, 0x00FFFFFF);
-    int cx3 = w * 850 / 1024; gfx_draw_filled_circle(cx3, 90, 26, 0x00FFFFFF);
-    gfx_draw_filled_circle(w * 880 / 1024, 75, 18, 0x00FFFFFF);
-    gfx_draw_filled_circle(w * 820 / 1024, 80, 16, 0x00FFFFFF);
+    int cx1 = w * 180 / 1024; gfx_draw_filled_circle(cx1, 80, 28, pal->cloud);
+    gfx_draw_filled_circle(w * 210 / 1024, 70, 22, pal->cloud);
+    gfx_draw_filled_circle(w * 240 / 1024, 85, 18, pal->cloud);
+    gfx_draw_filled_circle(w * 160 / 1024, 90, 15, pal->cloud);
+    int cx2 = w * 500 / 1024; gfx_draw_filled_circle(cx2, 100, 30, pal->cloud);
+    gfx_draw_filled_circle(w * 530 / 1024, 85, 20, pal->cloud);
+    gfx_draw_filled_circle(w * 470 / 1024, 95, 18, pal->cloud);
+    gfx_draw_filled_circle(w * 550 / 1024, 105, 14, pal->cloud);
+    int cx3 = w * 850 / 1024; gfx_draw_filled_circle(cx3, 90, 26, pal->cloud);
+    gfx_draw_filled_circle(w * 880 / 1024, 75, 18, pal->cloud);
+    gfx_draw_filled_circle(w * 820 / 1024, 80, 16, pal->cloud);
 }
 
 static void wallpaper_cache_build_once(void){
@@ -1229,6 +1254,110 @@ static void wallpaper_cache_build_once(void){
     s_puts(" (~"); s_put_dec((uint32_t)(b1 - b0)/3000); s_puts(" us) vs Bliss recompute "); s_put_cycles(wallpaper_build_cycles); s_puts(" -> speedup x"); s_put_dec((uint32_t)wallpaper_build_cycles / ((uint32_t)(b1-b0)==0?1:(uint32_t)(b1-b0))); s_puts("\n");
 }
 
+// --- Wallpaper presets: public API (see window.h Settings-app contract) ---
+const char *wallpaper_preset_name(int p){
+    if(p < 0 || p >= WALLPAPER_PRESET_COUNT) return "?";
+    return wallpaper_palettes[p].name;
+}
+// Invalidate cache + rebuild with current preset, effective on next frame.
+// Trace: menu "Change Wallpaper" -> cycle -> set -> rebuild draws Bliss with
+// new palette into back buffer, snapshots back->cache, sets ready + redraw flag.
+// No reboot: per-frame path blits whatever cache holds. One-time ~47M-cycle
+// hitch on switch (same cost as boot build), then back to cheap blits.
+// Safe mid-session: back buffer is redrawn from cache+windows on the next
+// redraw anyway, so overwriting it here loses nothing.
+void wallpaper_rebuild(void){
+    if(!wallpaper_cache_alloc()) return; // no-op after boot (buffer exists)
+    uint64_t t0 = rdtsc();
+    draw_bliss_wallpaper(); // reads wallpaper_preset
+    uint32_t *src = fb_get_back_buffer();
+    uint32_t *dst = wallpaper_cache;
+    uint32_t dwords = wallpaper_cache_bytes / 4;
+    __asm__ volatile("cld; rep movsl" : "+S"(src), "+D"(dst), "+c"(dwords) : : "memory");
+    wallpaper_cache_ready = 1;
+    uint64_t t1 = rdtsc();
+    s_puts("WALLPAPER: rebuilt preset "); s_put_dec(wallpaper_preset);
+    s_puts(" "); s_puts(wallpaper_preset_name(wallpaper_preset));
+    s_puts(" cycles "); s_put_cycles(t1 - t0); s_puts("\n");
+    g_needs_redraw = 1;
+}
+void wallpaper_set_preset(int p){
+    if(p < 0 || p >= WALLPAPER_PRESET_COUNT) return; // invalid: ignore, keep current
+    if(p == wallpaper_preset) return; // same: no work (avoids 47M rebuild hitch)
+    wallpaper_preset = p;
+    wallpaper_rebuild();
+}
+void wallpaper_cycle_preset(void){
+    wallpaper_set_preset((wallpaper_preset + 1) % WALLPAPER_PRESET_COUNT);
+}
+
+// --- Desktop right-click context menu ---
+// Layer: above everything (drawn after taskbar). Redraw discipline (per the
+// idle-Hz fix): flags ONLY on open/close/action. While open and idle nothing
+// sets flags - the menu repaints as part of whatever redraws already happen
+// (1Hz clock), adding ~100 rect+string ops to that frame, zero extra frames.
+#define CTX_W 152 // fits "Change Wallpaper" (16ch x 8px) + 24px padding
+#define CTX_ROW_H 24
+#define CTX_NITEMS 2
+#define CTX_H (8 + CTX_NITEMS*CTX_ROW_H) // 56
+static int ctx_open = 0;
+static int ctx_x = 0, ctx_y = 0; // top-left, clamped on open
+static const char *ctx_labels[CTX_NITEMS] = {"New Window", "Change Wallpaper"};
+void context_menu_open(int x, int y){
+    int fb_w = fb_get_width(), fb_h = fb_get_height();
+    ctx_x = x; ctx_y = y;
+    if(ctx_x + CTX_W > fb_w) ctx_x = fb_w - CTX_W; // clamp near right edge
+    if(ctx_x < 0) ctx_x = 0;
+    if(ctx_y + CTX_H > fb_h - TASKBAR_H) ctx_y = fb_h - TASKBAR_H - CTX_H; // above taskbar
+    if(ctx_y < 0) ctx_y = 0;
+    ctx_open = 1;
+    s_puts("CTX: open at "); s_put_dec(ctx_x); s_putc(','); s_put_dec(ctx_y); s_puts("\n");
+    g_needs_redraw = 1;
+}
+void context_menu_close(void){
+    if(!ctx_open) return;
+    ctx_open = 0;
+    s_puts("CTX: closed\n");
+    g_needs_redraw = 1;
+}
+int context_menu_is_open(void){ return ctx_open; }
+// Returns item index or -1. Same rects as draw (single source: CTX_* + ctx_x/y).
+static int context_menu_hit(int x, int y){
+    if(!ctx_open) return -1;
+    for(int i=0;i<CTX_NITEMS;i++){
+        int ix = ctx_x + 4, iy = ctx_y + 4 + i*CTX_ROW_H;
+        if(x >= ix && x < ix + CTX_W - 8 && y >= iy && y < iy + CTX_ROW_H) return i;
+    }
+    return -1;
+}
+void context_menu_draw(void){
+    if(!ctx_open || !fb_is_available()) return;
+    fb_draw_rect(ctx_x, ctx_y, CTX_W, CTX_H, 0x00F0F0F0);
+    gfx_draw_rect_outline(ctx_x, ctx_y, CTX_W, CTX_H, 0x00000000);
+    for(int i=0;i<CTX_NITEMS;i++)
+        gfx_draw_string(ctx_x + 12, ctx_y + 4 + i*CTX_ROW_H + 8, ctx_labels[i], 0x00000000);
+}
+int context_menu_handle_click(int x, int y){
+    // Left-click while open: item action + close, or outside-close. Consumed.
+    if(!ctx_open) return 0;
+    int item = context_menu_hit(x, y);
+    if(item == 0){ s_puts("CTX: action New Window\n"); window_create_new(); }
+    else if(item == 1){ s_puts("CTX: action Change Wallpaper\n"); wallpaper_cycle_preset(); }
+    else s_puts("CTX: click outside, close only\n");
+    context_menu_close(); // sets redraw flag (covers action's own flag too)
+    return 1;
+}
+int context_menu_handle_rightclick(int x, int y){
+    // Right-press: close open menu first; open only on EMPTY desktop
+    // (no window, no icon, not taskbar) - mirrors left-click priority order.
+    if(ctx_open) context_menu_close();
+    if(window_find_at(x, y) != -1) return 0;
+    if(desktop_icon_hit_test(x, y) != -1) return 0;
+    if(y >= fb_get_height() - TASKBAR_H) return 0;
+    context_menu_open(x, y);
+    return 1;
+}
+
 void window_manager_draw_all(void){
     if(!fb_is_available()) return;
     uint64_t t_wall0=0, t_wall1=0;
@@ -1253,6 +1382,7 @@ void window_manager_draw_all(void){
         window_draw_single(idx);
     }
     taskbar_draw();
+    context_menu_draw(); // topmost layer (above taskbar)
     uint64_t t_win1 = rdtsc();
     last_windows_cycles = t_win1 - t_win0;
     s_puts("WM: drew windows back->front z=[");

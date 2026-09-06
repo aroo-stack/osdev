@@ -174,6 +174,7 @@ void mouse_handle_byte(uint8_t data){
         s_puts("\n");
         int left_pressed = (buttons & 0x01) && !(prev_buttons & 0x01);
         int left_released = !(buttons & 0x01) && (prev_buttons & 0x01);
+        int right_pressed = (buttons & 0x02) && !(prev_buttons & 0x02); // right edge for context menu
         int moved = (new_x != mouse_x || new_y != mouse_y);
         if(window_is_dragging()){
             if(left_released){
@@ -217,10 +218,23 @@ void mouse_handle_byte(uint8_t data){
             } else {
                 mouse_x = new_x; mouse_y = new_y;
             }
+        } else if(right_pressed){
+            // Right-click: desktop context menu only (ignored while dragging/resizing).
+            // No redraw flag here unless the menu opens/closes (handled inside).
+            __asm__ volatile("cli");
+            mouse_x = new_x; mouse_y = new_y;
+            if(!window_is_dragging() && !window_is_resizing() && fb_is_available()){
+                context_menu_handle_rightclick(new_x, new_y);
+            }
+            __asm__ volatile("sti");
         } else if(left_pressed){
             __asm__ volatile("cli");
             mouse_x = new_x; mouse_y = new_y;
-            if(window_handle_close_click(new_x, new_y)){
+            if(context_menu_is_open()){
+                // Menu is topmost: consume the click (item action or outside-close)
+                // before any window/icon/taskbar handling.
+                context_menu_handle_click(new_x, new_y);
+            } else if(window_handle_close_click(new_x, new_y)){
             } else if(window_handle_minimize_click(new_x, new_y)){
             } else if(window_handle_taskbar_click(new_x, new_y)){
             } else {
