@@ -64,7 +64,9 @@ void task_clicker_entry(void){
         // Update Clicker's visible counter via shared single-word write (atomic on x86)
         // Find by title each iteration (handles window_close shifting)
         { int wi = window_find_by_title("Clicker"); if(wi!=-1) windows[wi].task_counter = count; }
-        extern volatile int g_needs_redraw; g_needs_redraw = 1;
+        // No g_needs_redraw here: the counter is not shown in-window anymore,
+        // Task Manager has its own periodic refresh. Counter write stays
+        // (single-word, atomic) for any reader; repaint only on real change.
         __asm__ volatile("cli");
         outb(0x3F8, 'A'); outb(0x3F8, ':'); 
         char buf[12]; int n=count++; int len=0; char tmp[12]; int t=0;
@@ -80,7 +82,7 @@ void task_notes_entry(void){
     for(;;){
         for(volatile int i=0;i<50000;i++) __asm__ volatile("nop");
         { int wi = window_find_by_title("Notes"); if(wi!=-1) windows[wi].task_counter = count; }
-        extern volatile int g_needs_redraw; g_needs_redraw = 1;
+        // No g_needs_redraw here (see Clicker task above for rationale).
         __asm__ volatile("cli");
         outb(0x3F8, 'B'); outb(0x3F8, ':');
         char buf[12]; int n=count++; int len=0; char tmp[12]; int t=0;
