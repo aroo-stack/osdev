@@ -114,6 +114,11 @@ static void cursor_draw(int x, int y){
 void mouse_cursor_restore(void){ cursor_restore(); }
 void mouse_cursor_draw_current(void){ cursor_draw(mouse_x, mouse_y); }
 void mouse_cursor_invalidate(void){ saved_valid = 0; }
+// Last-drawn cursor box + validity. window_do_redraw captures this BEFORE
+// restore() (which clears valid) so it can swap the old box to front after.
+void mouse_get_saved_box(int *x, int *y, int *valid){
+    if(x) *x = saved_x; if(y) *y = saved_y; if(valid) *valid = saved_valid;
+}
 // Swap the union of old-drawn and new cursor boxes (direct cursor-move path:
 // restore+draw touch only these boxes, so a full swap would waste ~8MB).
 static void cursor_swap_boxes(int ox, int oy, int nx, int ny){

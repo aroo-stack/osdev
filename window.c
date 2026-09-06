@@ -1697,6 +1697,11 @@ void window_do_redraw(void){
     // is painted+swapped separately below; restore() first erases the old box in
     // back (saved pixels are always fresh: every repaint path restores first).
     dr_x0=dx0; dr_y0=dy0; dr_x1=dx1; dr_y1=dy1;
+    // Capture old cursor box BEFORE restore() clears validity: restore erases
+    // it in back, but with partial swap that erasure never reaches front unless
+    // we swap the old box explicitly below (missing this = cursor ghosts).
+    int old_cx = 0, old_cy = 0, old_cv = 0;
+    mouse_get_saved_box(&old_cx, &old_cy, &old_cv);
     mouse_cursor_restore();
     mouse_cursor_invalidate();
     fb_set_clip(dx0, dy0, dx1-dx0, dy1-dy0);
@@ -1707,6 +1712,12 @@ void window_do_redraw(void){
     // Cursor box swaps separately (see above: never unioned into dirty).
     { int ccx, ccy; mouse_get_position(&ccx, &ccy);
       if(fb_is_double_buffered()) fb_swap_region(ccx, ccy, 16, 16); }
+    // Old cursor box: restore() erased it in back; carry that erasure to front
+    // (back there is either restored pixels or dirty-repaint, both correct).
+    // Skipped when identical to current (static cursor: no stretch, no waste).
+    { int ccx, ccy; mouse_get_position(&ccx, &ccy);
+      if(old_cv && (old_cx != ccx || old_cy != ccy) && fb_is_double_buffered())
+          fb_swap_region(old_cx, old_cy, 16, 16); }
     uint64_t t1 = rdtsc();
     if((g_redraw_count % 10)==0){
         s_puts("WM_REDRAW #"); s_put_dec(g_redraw_count);

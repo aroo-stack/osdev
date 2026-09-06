@@ -9,4 +9,5 @@ void mouse_get_position(int *x, int *y);
 void mouse_cursor_restore(void);
 void mouse_cursor_draw_current(void);
 void mouse_cursor_invalidate(void);
+void mouse_get_saved_box(int *x, int *y, int *valid); // last-drawn box, pre-restore
 #endif
