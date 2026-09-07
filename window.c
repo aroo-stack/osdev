@@ -66,7 +66,7 @@ static inline uint64_t rdtsc(void){ uint32_t lo,hi; __asm__ volatile("rdtsc":"=a
 volatile int g_needs_redraw = 0;
 
 // --- Bliss wallpaper cache (1x framebuffer, ~8.3MB at 1920x1080) to avoid recomputing sky+hills+circles every frame ---
-// Virtual layout (post-photo-blob): kernel image 0x00100000-~0x00970000, heap 0x00B00000-0x00C00000 (1MB), fb_back 0x00C00000-0x014E9000 (~8.3MB), wallpaper 0x01600000-0x01EE9000 (~8.3MB), paint canvas 0x02000000-0x02130000 (~1.2MB), task stacks 0x03000000+ below 0xFD000000 fb_front
+// Virtual layout (post-photo-blob): kernel image 0x00100000-~0x00970000, heap 0x00B00000-0x00C00000 (1MB), fb_back 0x00C00000-0x014E9000 (~8.3MB), wallpaper 0x01600000-0x01EE9000 (~8.3MB), photo stage 0x02200000-0x02A30000 (~8.3MB spare, allocated on first Photo switch), paint canvas 0x02000000-0x02130000 (~1.2MB), task stacks 0x03000000+ below 0xFD000000 fb_front
 static uint32_t *wallpaper_cache = 0;
 static uint32_t wallpaper_cache_bytes = 0;
 static uint32_t wallpaper_cache_pages = 0;
@@ -1658,24 +1658,100 @@ const char *wallpaper_preset_name(int p){
 // hitch on switch (same cost as boot build), then back to cheap blits.
 // Safe mid-session: back buffer is redrawn from cache+windows on the next
 // redraw anyway, so overwriting it here loses nothing.
+// --- Photo staged copy: chunked blob->spare transfer + pointer swap ---
+// Why staged (option (a) from the plan): while copying, the destination is
+// half-old/half-new, and per-frame blits read the LIVE cache - so the copy
+// must NOT target the cache. Instead chunks go to a SPARE 8.3MB buffer at
+// 0x02200000 (paint ends ~0x02130000, stacks at 0x03000000: clear), and at
+// completion the cache/stage POINTERS swap (zero-copy: no second 8MB memcpy,
+// no 178M hitch anywhere). Old wallpaper displays untouched until the swap,
+// then one dirty_all() repaints with the new image.
+// Redraw discipline: chunks set NO flags (nothing visible changes mid-copy),
+// so idle stays 1Hz through the transition; exactly one full frame at swap.
+// IRQ safety: single writer (main loop); a PIT preemption mid-chunk resumes
+// transparently (context switch saves ESI/EDI/ECX).
+// Chunk: 1080/20 = 54 rows (~9M cycles, a few ms) -> full image in ~20 main
+// loop iterations (~0.2s at ~100Hz wakeups). Snappy but unnoticeable per chunk.
+#define PHOTO_STAGE_VADDR 0x02200000
+#define PHOTO_CHUNK_ROWS 54
+static uint32_t *wallpaper_stage = 0;
+static int photo_copy_active = 0;
+static int photo_copy_row = 0;
+static int photo_copy_t0 = 0;
+static int wallpaper_stage_alloc(void){
+    if(wallpaper_stage) return 1;
+    if(!fb_is_available()) return 0;
+    uint32_t need = wallpaper_cache_bytes; // same size as cache by construction
+    if(need == 0) return 0;
+    uint32_t pages = (need + 0xFFF) >> 12;
+    s_puts("WALLPAPER: stage alloc "); s_put_dec(pages); s_puts(" pages at 0x02200000\n");
+    for(uint32_t i=0;i<pages;i++){
+        uint32_t p = pmm_alloc_frame();
+        if(!p){ s_puts("WALLPAPER: stage out of frames!\n"); return 0; }
+        paging_map(PHOTO_STAGE_VADDR + i*0x1000, p, 0x03);
+    }
+    wallpaper_stage = (uint32_t*)PHOTO_STAGE_VADDR;
+    return 1;
+}
+// One chunk per main-loop iteration (called from kernel main loop, NOT from
+// the click handler: the click only starts the job and returns instantly).
+void wallpaper_copy_poll(void){
+    if(!photo_copy_active) return;
+    int fh = (int)fb_get_height(), fw = (int)fb_get_width();
+    int rows = PHOTO_CHUNK_ROWS;
+    if(photo_copy_row + rows > fh) rows = fh - photo_copy_row;
+    if(rows > 0 && wallpaper_stage){
+        // Blob is width-packed (1920*4 stride); stage mirrors back-buffer
+        // layout (pitch stride). Equal on our modes; pitch-correct anyway.
+        uint32_t blob_stride_dw = 1920;
+        uint32_t stage_stride_dw = fb_get_pitch() / 4;
+        for(int r=0; r<rows; r++){
+            uint32_t *s = (uint32_t*)photo_wallpaper_data + (uint32_t)(photo_copy_row+r) * blob_stride_dw;
+            uint32_t *d = wallpaper_stage + (uint32_t)(photo_copy_row+r) * stage_stride_dw;
+            uint32_t dwords = (uint32_t)fw;
+            __asm__ volatile("cld; rep movsl" : "+S"(s), "+D"(d), "+c"(dwords) : : "memory");
+        }
+        photo_copy_row += rows;
+    } else {
+        photo_copy_row = fh; // degenerate: finish immediately
+    }
+    if(photo_copy_row >= fh){
+        // Swap pointers (zero-copy) + single full repaint with the new image.
+        uint32_t *tmp = wallpaper_cache;
+        wallpaper_cache = wallpaper_stage;
+        wallpaper_stage = tmp;
+        photo_copy_active = 0;
+        int dt = pit_get_ticks() - photo_copy_t0;
+        s_puts("WALLPAPER: photo staged swap ready in "); s_put_dec(dt < 0 ? 0 : dt);
+        s_puts(" ticks\n");
+        dirty_all();
+    }
+}
+
 void wallpaper_rebuild(void){
     if(!wallpaper_cache_alloc()) return; // no-op after boot (buffer exists)
     uint64_t t0 = rdtsc();
     if(wallpaper_preset == 3){
-        // Photo preset: direct copy of the embedded 8MB blob into back buffer
-        // (no procedural generation - much cheaper than Bliss). Byte count
-        // verified FIRST: it must equal exactly 1920*1080*4 AND the cache size,
-        // or rows shift/corrupt. Mismatch -> Bliss fallback, never garbage.
+        // Photo preset: STAGED copy (see photo staging block below). Validates
+        // size, allocates the spare buffer, and starts the background chunk job.
+        // Returns immediately (no hitch, no redraw flag: old image stays until
+        // the swap). Size mismatch -> Bliss fallback, never garbage.
         uint32_t nbytes = (uint32_t)(photo_wallpaper_end - photo_wallpaper_data);
         if(nbytes != (uint32_t)1920*1080*4 || nbytes != wallpaper_cache_bytes){
             s_puts("WALLPAPER: photo size mismatch (got "); s_put_dec(nbytes);
             s_puts(" want 8294400), Bliss fallback\n");
             draw_bliss_wallpaper();
-        } else {
+        } else if(!wallpaper_stage_alloc()){
+            s_puts("WALLPAPER: stage alloc failed, sync copy fallback\n");
             uint32_t *src = (uint32_t*)photo_wallpaper_data;
-            uint32_t *dst = fb_get_back_buffer();
+            uint32_t *dst = wallpaper_cache;
             uint32_t dwords = nbytes / 4;
             __asm__ volatile("cld; rep movsl" : "+S"(src), "+D"(dst), "+c"(dwords) : : "memory");
+        } else {
+            photo_copy_active = 1; photo_copy_row = 0;
+            photo_copy_t0 = pit_get_ticks();
+            s_puts("WALLPAPER: photo staged copy started\n");
+            return; // no snapshot/dirty yet: cache still holds the old image
         }
     } else {
         draw_bliss_wallpaper(); // reads wallpaper_preset (0-2)
@@ -1693,7 +1769,11 @@ void wallpaper_rebuild(void){
 }
 void wallpaper_set_preset(int p){
     if(p < 0 || p >= WALLPAPER_PRESET_COUNT) return; // invalid: ignore, keep current
-    if(p == wallpaper_preset) return; // same: no work (avoids 47M rebuild hitch)
+    if(p == wallpaper_preset) return; // same: no work (re-click Photo mid-copy keeps copying)
+    if(photo_copy_active){ // switching away mid-copy: abandon staged rows (restart at 0 next time)
+        photo_copy_active = 0;
+        s_puts("WALLPAPER: staged copy cancelled\n");
+    }
     wallpaper_preset = p;
     wallpaper_rebuild();
 }

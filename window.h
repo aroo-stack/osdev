@@ -87,6 +87,7 @@ int clock_apply_tz(int utc_sec, int off_hours); // pure wrap math, testable
 extern int wallpaper_preset;
 void wallpaper_set_preset(int p);
 void wallpaper_cycle_preset(void);
+void wallpaper_copy_poll(void); // photo staged-copy chunk (call each main-loop iteration)
 const char *wallpaper_preset_name(int p);
 // desktop right-click context menu (empty desktop only)
 void context_menu_open(int x, int y);

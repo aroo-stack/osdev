@@ -374,6 +374,10 @@ void kernel_main(uint32_t magic, uint32_t mbi_addr) {
         // not every frame - same deferred-redraw pattern as everything else.
         { int clk_sec = pit_get_ticks() / 100;
           if(clk_sec != last_clk_sec){ last_clk_sec = clk_sec; taskbar_clock_invalidate(); } }
+        // Photo wallpaper staged copy: a few rows per iteration (no redraw flags
+        // from the copy itself; single full repaint only at the swap). Click
+        // handler only starts the job, so switching feels instant.
+        wallpaper_copy_poll();
         // Task Manager live refresh - every ~20 iterations (~0.5s) to update tick counts without constant redraw
         // Chosen over every loop (60Hz full redraw = 180MB/s) to keep responsiveness, vs every second would be too laggy to watch counts climb
         // Dynamic: find Task Manager by title, not hardcoded index 3 / count 4 (now boots with 2 windows)
