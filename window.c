@@ -435,11 +435,17 @@ void paint_stroke_at(int x, int y){
         if(steps > 200) steps = 200; // teleport guard (e.g. window moved mid-stroke)
         for(int s=0;s<=steps;s++)
             paint_dot(paint_last_x + dx*s/steps, paint_last_y + dy*s/steps);
+        // Dirty the WHOLE segment bounds (not just the endpoint): the blit only
+        // transfers the dirty intersection, and anything outside it stays stale
+        // on screen even though the buffer holds the full line (dotted-line bug).
+        int sx0 = paint_last_x<bx?paint_last_x:bx, sy0 = paint_last_y<by?paint_last_y:by;
+        int sx1 = paint_last_x>bx?paint_last_x:bx, sy1 = paint_last_y>by?paint_last_y:by;
+        dirty_add(w->x+10+sx0-5, w->y+66+sy0-5, sx1-sx0+10, sy1-sy0+10);
     } else {
         paint_dot(bx, by);
+        dirty_add(x-5, y-5, 10, 10); // brush r=3 + margin (also sets redraw flag)
     }
     paint_last_x = bx; paint_last_y = by; paint_last_valid = 1;
-    dirty_add(x-5, y-5, 10, 10); // brush r=3 + margin (also sets redraw flag)
 }
 void paint_end_stroke(void){ paint_last_valid = 0; }
 // Blit visible canvas portion into the window body. Visible rect = buffer
@@ -449,27 +455,34 @@ void paint_end_stroke(void){ paint_last_valid = 0; }
 static void paint_blit(struct window *w){
     paint_ensure_canvas(); if(!paint_canvas) return;
     int ox = w->x+10, oy = w->y+66; // canvas screen origin
-    int x0 = ox, y0 = oy, x1 = ox+PAINT_CW, y1 = oy+PAINT_CH;
-    if(x1 > w->x+w->w-10) x1 = w->x+w->w-10; // window client clip
-    if(y1 > w->y+w->h-10) y1 = w->y+w->h-10;
-    if(x0 < w->x+10) x0 = w->x+10; if(y0 < oy) y0 = oy;
-    if(x0 < 0) x0 = 0; if(y0 < 0) y0 = 0; // screen clip
+    // Visible canvas rect: window client + screen only (NOT dirty-intersected:
+    // the frame below belongs around this, and drawing it around the dirty
+    // intersection stamped a hollow box per stroke frame - the square-trail bug).
+    int vx0 = ox, vy0 = oy, vx1 = ox+PAINT_CW, vy1 = oy+PAINT_CH;
+    if(vx1 > w->x+w->w-10) vx1 = w->x+w->w-10; // window client clip
+    if(vy1 > w->y+w->h-10) vy1 = w->y+w->h-10;
+    if(vx0 < 0) vx0 = 0; if(vy0 < 0) vy0 = 0; // screen clip
     int fw = (int)fb_get_width(), fh = (int)fb_get_height();
-    if(x1 > fw) x1 = fw; if(y1 > fh) y1 = fh;
-    // Dirty-rect intersect (this loop bypasses fb_* clip): repaint only the
-    // changed portion of the canvas, not the whole 640x480 every stroke.
-    if(x0 < dr_x0) x0 = dr_x0; if(y0 < dr_y0) y0 = dr_y0;
-    if(x1 > dr_x1) x1 = dr_x1; if(y1 > dr_y1) y1 = dr_y1;
-    if(x0 >= x1 || y0 >= y1) return; // nothing visible
-    uint32_t *back = fb_get_back_buffer(); if(!back) return;
-    uint32_t stride_dw = fb_get_pitch() / 4;
-    for(int ry=y0; ry<y1; ry++){
-        uint32_t *s = paint_canvas + (uint32_t)(ry-oy) * PAINT_CW + (uint32_t)(x0-ox);
-        uint32_t *d = back + (uint32_t)ry * stride_dw + (uint32_t)x0;
-        uint32_t dwords = (uint32_t)(x1-x0);
-        __asm__ volatile("cld; rep movsl" : "+S"(s), "+D"(d), "+c"(dwords) : : "memory");
+    if(vx1 > fw) vx1 = fw; if(vy1 > fh) vy1 = fh;
+    if(vx0 >= vx1 || vy0 >= vy1) return; // nothing visible
+    // Row blits intersect dirty too (this loop bypasses fb_* clip): repaint
+    // only the changed portion, not the whole canvas every stroke.
+    int x0 = vx0 < dr_x0 ? dr_x0 : vx0, y0 = vy0 < dr_y0 ? dr_y0 : vy0;
+    int x1 = vx1 > dr_x1 ? dr_x1 : vx1, y1 = vy1 > dr_y1 ? dr_y1 : vy1;
+    if(x0 < x1 && y0 < y1){
+        uint32_t *back = fb_get_back_buffer(); if(!back) return;
+        uint32_t stride_dw = fb_get_pitch() / 4;
+        for(int ry=y0; ry<y1; ry++){
+            uint32_t *s = paint_canvas + (uint32_t)(ry-oy) * PAINT_CW + (uint32_t)(x0-ox);
+            uint32_t *d = back + (uint32_t)ry * stride_dw + (uint32_t)x0;
+            uint32_t dwords = (uint32_t)(x1-x0);
+            __asm__ volatile("cld; rep movsl" : "+S"(s), "+D"(d), "+c"(dwords) : : "memory");
+        }
     }
-    gfx_draw_rect_outline(x0, y0, x1-x0, y1-y0, 0x00000000); // frame the visible canvas
+    // Frame the VISIBLE canvas (fb clip constrains pixels: no stray boxes even
+    // when dirty covers only part of it).
+    if(rects_overlap(vx0, vy0, vx1-vx0, vy1-vy0, dr_x0, dr_y0, dr_x1, dr_y1))
+        gfx_draw_rect_outline(vx0, vy0, vx1-vx0, vy1-vy0, 0x00000000);
 }
 // Palette dispatch: buttons 0-4 set color, button 5 = Clear (white + dirty
 // the canvas screen area so the erase shows immediately).
