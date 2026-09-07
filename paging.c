@@ -8,6 +8,12 @@ static uint32_t page_directory[1024] __attribute__((aligned(4096)));
 static uint32_t page_table_0[1024] __attribute__((aligned(4096)));
 static uint32_t page_table_1[1024] __attribute__((aligned(4096))); // for heap 4MB..8MB
 static uint32_t page_table_high[1024] __attribute__((aligned(4096))); // reserved high half if needed
+// Identity-map extension 8MB..32MB: the kernel image itself can extend past 4MB
+// (photo blob ends ~9.4MB, and .bss/stack with it). Enabling paging with only
+// 0..4MB mapped triple-faults on the first stack push, because the stack lives
+// in .bss above the image. 8 tables cover 0..32MB (heap 11MB, back 12-20.9MB,
+// cache start 22MB); higher regions still map on demand via paging_map.
+static uint32_t page_table_id2[6][1024] __attribute__((aligned(4096))); // PDEs 2..7
 
 static inline void outb(uint16_t port, uint8_t v){ __asm__ volatile("outb %0,%1"::"a"(v),"Nd"(port));}
 static inline uint8_t inb(uint16_t port){ uint8_t r; __asm__ volatile("inb %1,%0":"=a"(r):"Nd"(port)); return r;}
@@ -151,17 +157,28 @@ void paging_init(void){
     for(int i=0;i<1024;i++) page_table_0[i]=0;
     for(int i=0;i<1024;i++) page_table_1[i]=0;
     for(int i=0;i<1024;i++) page_table_high[i]=0;
+    for(int t=0;t<6;t++) for(int i=0;i<1024;i++) page_table_id2[t][i]=0;
 
-    // Identity map first 4MB: each PTE maps 4KB page VA==PA
+    // Identity map first 32MB (8 PDEs x 4MB): each PTE maps 4KB page VA==PA
     // PTE flags: P=1 RW=1 US=0 => 0x03 (present + writable, supervisor)
     for(int i=0;i<1024;i++){
         uint32_t frame = i * 0x1000;
         page_table_0[i] = frame | 0x03; // 0b11
     }
-
     // PDE 0 points to page_table_0
     // PDE flags: P=1 RW=1 US=0 PWT=0 PCD=0 A=0 PS=0 (4KB) => also 0x03
     page_directory[0] = ((uint32_t)page_table_0 & 0xFFFFF000) | 0x03;
+    // PDEs 1..7: page_table_1 (shared with on-demand mapper) + 6 extra tables
+    page_directory[1] = ((uint32_t)page_table_1 & 0xFFFFF000) | 0x03;
+    for(int p=0;p<6;p++){
+        for(int i=0;i<1024;i++)
+            page_table_id2[p][i] = (uint32_t)((p+2)*0x400000 + i*0x1000) | 0x03;
+        page_directory[2+p] = ((uint32_t)page_table_id2[p] & 0xFFFFF000) | 0x03;
+    }
+    for(int i=0;i<1024;i++){
+        uint32_t frame = 0x400000 + i * 0x1000; // 4MB..8MB via page_table_1
+        page_table_1[i] = frame | 0x03;
+    }
 
     // Ensure CR4.PSE = 0 (disable 4MB pages) for 4KB mode; BIOS leaves 0
     uint32_t cr4;

@@ -4,7 +4,7 @@
 #include <stdint.h>
 #include <stddef.h>
 
-#define HEAP_START 0x00400000u // past 4MB identity map
+#define HEAP_START 0x00B00000u // 11MB: above the kernel image (photo blob ends ~9.4MB)
 #define HEAP_SIZE  0x00100000u // 1MB (256 pages)
 #define HEAP_END   (HEAP_START + HEAP_SIZE)
 

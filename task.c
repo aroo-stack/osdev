@@ -110,7 +110,8 @@ int task_create_with_id(int want_id, void (*entry)(void), const char *name){
     }
     __asm__ volatile("popf" ::: "memory");
     if(new_id==-1) return -1;
-    // Avoid overlap with back buffer at 0x01000000 (16MB, 8.3M) and heap at 0x00400000
+    // Stacks at 0x03000000+ (48MB): clear of kernel image (~9.4MB), heap (11MB),
+    // back buffer (12-20.9MB), wallpaper cache (22-30.2MB), paint canvas (32MB).
     // Use id-based vbase so killed stacks can be reused without overlap
     uint32_t vbase = 0x03000000 + new_id * TASK_STACK_SIZE;
     paging_ensure_range(vbase, TASK_STACK_SIZE);

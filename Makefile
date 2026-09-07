@@ -64,8 +64,11 @@ task.o: task.c task.h
 sched.o: sched.s
 	$(AS) -f elf32 sched.s -o sched.o
 
-kernel.bin: boot.o kernel.o gdt.o gdt_flush.o idt.o isr.o pmm.o paging.o heap.o framebuffer.o graphics.o mouse.o window.o pit.o task.o sched.o rtc.o linker.ld
-	ld $(LDFLAGS) -o kernel.bin boot.o kernel.o gdt.o gdt_flush.o idt.o isr.o pmm.o paging.o heap.o framebuffer.o graphics.o mouse.o window.o pit.o task.o sched.o rtc.o
+photo.o: photo.s wallpaper.bin
+	$(AS) -f elf32 photo.s -o photo.o
+
+kernel.bin: boot.o kernel.o gdt.o gdt_flush.o idt.o isr.o pmm.o paging.o heap.o framebuffer.o graphics.o mouse.o window.o pit.o task.o sched.o rtc.o photo.o linker.ld
+	ld $(LDFLAGS) -o kernel.bin boot.o kernel.o gdt.o gdt_flush.o idt.o isr.o pmm.o paging.o heap.o framebuffer.o graphics.o mouse.o window.o pit.o task.o sched.o rtc.o photo.o
 
 os.iso: kernel.bin
 	mkdir -p isodir/boot/grub

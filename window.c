@@ -66,8 +66,7 @@ static inline uint64_t rdtsc(void){ uint32_t lo,hi; __asm__ volatile("rdtsc":"=a
 volatile int g_needs_redraw = 0;
 
 // --- Bliss wallpaper cache (1x framebuffer, ~8.3MB at 1920x1080) to avoid recomputing sky+hills+circles every frame ---
-// Trade: PMM has ~127MB free (~32300 frames before), back buffer 2025 pages (~8.3MB at 1920*1080*4), cache also 2025 pages => ~16.6MB total + heap/task stacks ~ few MB => ~20MB well within 127MB
-// Virtual layout: heap 0x00400000-0x00500000 (1MB), fb_back 0x00600000-0x00DE9000 (~8.3MB), wallpaper 0x00F00000-0x016E9000 (~8.3MB), task stacks 0x03000000+ below 0xFD000000 fb_front (tried 0x01000000/0x02000000 at 16M/32M but high PD caused slow rep movsl)
+// Virtual layout (post-photo-blob): kernel image 0x00100000-~0x00970000, heap 0x00B00000-0x00C00000 (1MB), fb_back 0x00C00000-0x014E9000 (~8.3MB), wallpaper 0x01600000-0x01EE9000 (~8.3MB), paint canvas 0x02000000-0x02130000 (~1.2MB), task stacks 0x03000000+ below 0xFD000000 fb_front
 static uint32_t *wallpaper_cache = 0;
 static uint32_t wallpaper_cache_bytes = 0;
 static uint32_t wallpaper_cache_pages = 0;
@@ -78,6 +77,10 @@ static int wallpaper_cache_ready = 0;
 // redraw). Same geometry for all presets, different palettes - cheap to
 // generate procedurally, no new assets.
 int wallpaper_preset = 0;
+// Photo blob (photo.s incbin, .rodata): raw 1920x1080x32 pixels, BGRA byte
+// order = 0x00RRGGBB like fb_put_pixel. Pointer-difference gives exact size.
+extern uint8_t photo_wallpaper_data[];
+extern uint8_t photo_wallpaper_end[];
 struct wallpaper_palette {
     const char *name;
     uint32_t sky_top, sky_bot; // gradient + horizon fill
@@ -91,6 +94,7 @@ static const struct wallpaper_palette wallpaper_palettes[WALLPAPER_PRESET_COUNT]
     {"Day", 0x0087CEEB,0x00B0E0E6, 0x00FFFFE0,0x00FFFFFF, 40,35,0, 0x0090C060,0x0030A030, 0x00FFFFFF},
     {"Sunset", 0x003B2E6E,0x00FF8C42, 0x00FF5A2A,0x00FFD166, 48,40,1, 0x006B4E71,0x002E4038, 0x00FFB59E},
     {"Night", 0x00050914,0x000B1D3A, 0x00E8EDF2,0x00FFFFFF, 30,24,0, 0x000E2A1A,0x0005130C, 0x003A4A63},
+    {"Photo", 0,0, 0,0, 0,0,0, 0,0, 0}, // colors unused: direct blob copy (see rebuild)
 };
 static uint64_t wallpaper_build_cycles = 0; // cycles to build once
 static uint64_t last_wallpaper_cycles = 0; // per-frame wallpaper cost (recompute or blit)
@@ -286,18 +290,18 @@ static void calculator_init_window(int nid){
 }
 
 // Shared tz preset table: timezone_cycle() steps it, Settings buttons index it
-// directly (b-3). City labels live in settings_init_window (display only).
+// directly (b-4). City labels live in settings_init_window (display only).
 static const int tz_preset_offsets[TIMEZONE_PRESET_COUNT] = {0, 10, -5, 9};
 // --- Settings: 4th app, NO background task (same reasoning as Calculator:
 // purely reactive - state changes only in the button-up path, paints via
-// g_needs_redraw). Reuses the multi-button widget array (7 buttons).
+// g_needs_redraw). Reuses the multi-button widget array (8 buttons).
 // Layout (window 380x220): "Wallpaper:" label + 3 direct-set buttons
 // (Day/Sunset/Night) in a row; "Timezone:" label + 2x2 grid with CITY labels
 // (display-only; same offsets/logic as tz presets). Selection highlight reads
 // wallpaper_preset / tz_offset_hours live - no duplicate state.
 static void settings_init_window(int nid){
     struct window *w = &windows[nid];
-    static const char *wp[3] = {"Day", "Sunset", "Night"};
+    static const char *wp[4] = {"Day", "Sunset", "Night", "Photo"};
     static const char *tz[4] = {"UTC", "Sydney (UTC+10)", "New York (UTC-5)", "Tokyo (UTC+9)"};
     w->x=600; w->y=120; w->w=380; w->h=220;
     w_strcpy(w->title, "Settings", 32);
@@ -305,15 +309,15 @@ static void settings_init_window(int nid){
     w->visible=1; w->minimized=0; w->z=window_count;
     w->has_textbox=0; w->has_calc=0; w->has_settings=1; w->has_paint=0;
     w->has_button=1; w->num_btns=0;
-    for(int i=0;i<3;i++){ // wallpaper row: y=52 h=30, x=20/136/252 w=106
-        w->btns[i].x = 20+i*116; w->btns[i].y = 52;
-        w->btns[i].w = 106; w->btns[i].h = 30;
+    for(int i=0;i<4;i++){ // wallpaper row: y=52 h=30, x=20/110/200/290 w=80 (ends 370)
+        w->btns[i].x = 20+i*90; w->btns[i].y = 52;
+        w->btns[i].w = 80; w->btns[i].h = 30;
         w_strcpy(w->btns[i].label, wp[i], 32);
         w->btns[i].pressed = 0; w->btns[i].clicks = 0;
         w->num_btns++;
     }
     for(int i=0;i<4;i++){ // timezone 2x2: x=20/200 w=170, y=122/162 h=30
-        int b = 3+i;
+        int b = 4+i;
         w->btns[b].x = 20+(i%2)*180; w->btns[b].y = 122+(i/2)*40;
         w->btns[b].w = 170; w->btns[b].h = 30;
         w_strcpy(w->btns[b].label, tz[i], 32);
@@ -340,11 +344,11 @@ static void settings_open_or_focus(void){
     } else s_puts("DESKTOP: cannot create Settings - at max\n");
 }
 // Direct-SET (not cycle) via the same setters the old menu items called:
-// wallpaper_set_preset(b), timezone_set_offset(tz_preset_offsets[b-3]).
+// wallpaper_set_preset(b), timezone_set_offset(tz_preset_offsets[b-4]).
 // Setters flag redraw themselves, so the desktop updates immediately.
 static void settings_handle_button(struct window *w, int b){
-    if(b < 3) wallpaper_set_preset(b); // rebuild dirties full screen itself
-    else timezone_set_offset(tz_preset_offsets[b-3]);
+    if(b < 4) wallpaper_set_preset(b); // rebuild dirties full screen itself
+    else timezone_set_offset(tz_preset_offsets[b-4]);
     // Settings window (highlight follows) + taskbar clock area (tz jumps).
     dirty_add(w->x, w->y, w->w, w->h);
     taskbar_clock_invalidate();
@@ -761,8 +765,8 @@ static void window_draw_single(int idx){
         gfx_draw_string(w->x+20, w->y+102, "Timezone:", 0x00000000);
         int n = w->num_btns; if(n > MAX_BTNS) n = MAX_BTNS;
         for(int b=0;b<n;b++){
-            int active = (b < 3) ? (wallpaper_preset == b)
-                                 : (tz_offset_hours == tz_preset_offsets[b-3]);
+            int active = (b < 4) ? (wallpaper_preset == b)
+                                 : (tz_offset_hours == tz_preset_offsets[b-4]);
             if(!active) continue;
             int ax = w->x + w->btns[b].x, ay = w->y + w->btns[b].y;
             int bw = w->btns[b].w, bh = w->btns[b].h;
@@ -1486,7 +1490,7 @@ static int wallpaper_cache_alloc(void){
     uint32_t need = (uint32_t)w * (uint32_t)h * 4;
     wallpaper_cache_bytes = need;
     wallpaper_cache_pages = (need + 0xFFF) >> 12; // e.g., 768 for 1024x768 (3MB) vs 2025 for 1920x1080 (8.3MB)
-    uint32_t vaddr = 0x00F00000; // after fb_back 0x00600000+8.3M=0x00DE9000, so 0x00F00000 (15M) safely after, still low for cache friendliness (was 0x02000000 at 32M, caused slow blit)
+    uint32_t vaddr = 0x01600000; // 22MB: after fb_back 0x00C00000+8.3M=0x014E9000; paint canvas at 0x02000000 (32M) stays clear (ends ~30.2MB)
     s_puts("WALLPAPER: cache alloc "); s_put_dec(wallpaper_cache_pages); s_puts(" pages need "); s_put_dec(need/1024); s_puts(" KB at "); s_put_hex32(vaddr);
     s_puts(" PMM free before "); s_put_dec(pmm_free_frames()); s_puts("\n");
     for(uint32_t i=0;i<wallpaper_cache_pages;i++){
@@ -1565,7 +1569,7 @@ static void draw_bliss_wallpaper(void){
     // Trace addresses: hill_base = sky_h = h*60/100, sky GRAD filled y=0..sky_h-1, hills fill y=far_y..h-1
     // Previously period 128 (8 hills) and 85 (12 hills) => sawtooth. Now period scaled with width to keep visual: 600/400 at 1024 => 1.71/2.56 hills
     // At 1920, periods 1125/750 keep same 1.71/2.56 visual (1920/1125≈1.71). Phase = x*256/period &0xFF, hill_y = sky_h + baseOff + amp*sin/128
-    // Address trace: fb at 0xFD000000, back 0x00600000, cache 0x00F00000, per-column 1x(h-y) writes w*~h*0.4 avg pixels, no overlap gap
+    // Address trace: fb at 0xFD000000, back 0x00C00000, cache 0x01600000, per-column 1x(h-y) writes w*~h*0.4 avg pixels, no overlap gap
     uint32_t far_green = pal->far_green; // lighter far layer
     uint32_t near_green = pal->near_green; // darker near layer
     int far_period = w * 600 / 1024; if(far_period < 1) far_period = 1;
@@ -1657,7 +1661,25 @@ const char *wallpaper_preset_name(int p){
 void wallpaper_rebuild(void){
     if(!wallpaper_cache_alloc()) return; // no-op after boot (buffer exists)
     uint64_t t0 = rdtsc();
-    draw_bliss_wallpaper(); // reads wallpaper_preset
+    if(wallpaper_preset == 3){
+        // Photo preset: direct copy of the embedded 8MB blob into back buffer
+        // (no procedural generation - much cheaper than Bliss). Byte count
+        // verified FIRST: it must equal exactly 1920*1080*4 AND the cache size,
+        // or rows shift/corrupt. Mismatch -> Bliss fallback, never garbage.
+        uint32_t nbytes = (uint32_t)(photo_wallpaper_end - photo_wallpaper_data);
+        if(nbytes != (uint32_t)1920*1080*4 || nbytes != wallpaper_cache_bytes){
+            s_puts("WALLPAPER: photo size mismatch (got "); s_put_dec(nbytes);
+            s_puts(" want 8294400), Bliss fallback\n");
+            draw_bliss_wallpaper();
+        } else {
+            uint32_t *src = (uint32_t*)photo_wallpaper_data;
+            uint32_t *dst = fb_get_back_buffer();
+            uint32_t dwords = nbytes / 4;
+            __asm__ volatile("cld; rep movsl" : "+S"(src), "+D"(dst), "+c"(dwords) : : "memory");
+        }
+    } else {
+        draw_bliss_wallpaper(); // reads wallpaper_preset (0-2)
+    }
     uint32_t *src = fb_get_back_buffer();
     uint32_t *dst = wallpaper_cache;
     uint32_t dwords = wallpaper_cache_bytes / 4;

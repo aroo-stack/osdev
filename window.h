@@ -83,7 +83,7 @@ int clock_apply_tz(int utc_sec, int off_hours); // pure wrap math, testable
 // wallpaper presets - session global for a future Settings app:
 // read via wallpaper_preset, change ONLY via wallpaper_set_preset/cycle
 // (setter validates + rebuilds cache + redraws). 0=Day 1=Sunset 2=Night.
-#define WALLPAPER_PRESET_COUNT 3
+#define WALLPAPER_PRESET_COUNT 4
 extern int wallpaper_preset;
 void wallpaper_set_preset(int p);
 void wallpaper_cycle_preset(void);

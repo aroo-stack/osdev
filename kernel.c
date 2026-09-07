@@ -164,7 +164,7 @@ void kernel_main(uint32_t magic, uint32_t mbi_addr) {
         pmm_print_stats();
     }
 
-    serial_puts("PAGING: installing identity map 0..4MB...\n");
+    serial_puts("PAGING: installing identity map 0..32MB...\n");
     paging_init();
     serial_puts("PAGING: enabled OK\n");
     // strengthened r/w test: volatile, multiple addresses including edge of 4MB

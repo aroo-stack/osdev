@@ -115,12 +115,10 @@ int fb_init(struct multiboot_info *mbi){
     }
     s_puts("FB: PMM free before back buffer: "); s_put_dec(pmm_free_frames()); s_puts(" frames\n");
 
-    // Choose virtual address for back buffer beyond heap and framebuffer
-    // Heap is 0x00400000-0x00500000 (1MB), framebuffer is 0xFD000000,
-    // For 1920x1080 need 8.3M (2025 pages) vs 1024x768 3M, so place at 0x00600000 (6MB) within PD 1 (4M-8M) already partially mapped for heap
-    // to keep TLB/cache friendly. Previously 0x01000000/0x02000000 at 16M/32M caused high-page table allocations and slow rep movsl (81M vs 7M expected).
-    // 0x00600000 (6M) uses same PD as heap (PD1) so no new high tables, and is low enough to stay cacheable.
-    uint32_t back_vaddr = 0x00600000;
+    // Choose virtual address for back buffer beyond the kernel image: the photo
+    // blob ends the image near ~9.4MB, so place at 0x00C00000 (12MB).
+    // For 1920x1080 need 8.3M (2025 pages), spanning 0x00C00000-0x014E9000.
+    uint32_t back_vaddr = 0x00C00000;
     uint32_t back_pages = (need + 0xFFF) >> 12;
     s_puts("FB: allocating back buffer "); s_put_dec(back_pages); s_puts(" pages at virtual "); s_put_hex32(back_vaddr); s_puts("\n");
     paging_ensure_range(back_vaddr, need);
