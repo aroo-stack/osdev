@@ -52,6 +52,24 @@ uint16_t pci_config_read_word(uint8_t bus, uint8_t dev, uint8_t fn, uint8_t offs
     return (uint16_t)((v >> ((offset & 2) * 8)) & 0xFFFF); // OSDev form
 }
 
+void pci_config_write_word(uint8_t bus, uint8_t dev, uint8_t fn, uint8_t offset, uint16_t val){
+    // Mechanism #1 write: select via 0xCF8, full dword via 0xCFC. RMW keeps
+    // the untouched half (e.g. status word when writing command at 0x04).
+    uint32_t address = 0x80000000u
+        | ((uint32_t)bus << 16)
+        | ((uint32_t)(dev & 0x1F) << 11)
+        | ((uint32_t)(fn & 0x07) << 8)
+        | (offset & 0xFC);
+    pci_outl(PCI_ADDR_PORT, address);
+    pci_outb(0x80, 0);
+    uint32_t cur = pci_inl(PCI_DATA_PORT);
+    uint32_t shift = (offset & 2) * 8;
+    uint32_t patched = (cur & ~(0xFFFFu << shift)) | ((uint32_t)val << shift);
+    pci_outl(PCI_ADDR_PORT, address); // reselect (reads reset selection to 0xD)
+    pci_outb(0x80, 0);
+    pci_outl(PCI_DATA_PORT, patched);
+}
+
 // RTL8139 findings, filled by the scan.
 static int rtl_found = 0;
 static int rtl_bus = 0, rtl_dev = 0, rtl_fn = 0;

@@ -61,6 +61,9 @@ rtc.o: rtc.c rtc.h
 pci.o: pci.c pci.h
 	$(CC) $(CFLAGS) -c pci.c -o pci.o
 
+rtl8139.o: rtl8139.c rtl8139.h pci.h
+	$(CC) $(CFLAGS) -c rtl8139.c -o rtl8139.o
+
 task.o: task.c task.h
 	$(CC) $(CFLAGS) -c task.c -o task.o
 
@@ -70,8 +73,8 @@ sched.o: sched.s
 photo.o: photo.s wallpaper.bin
 	$(AS) -f elf32 photo.s -o photo.o
 
-kernel.bin: boot.o kernel.o gdt.o gdt_flush.o idt.o isr.o pmm.o paging.o heap.o framebuffer.o graphics.o mouse.o window.o pit.o task.o sched.o rtc.o photo.o pci.o linker.ld
-	ld $(LDFLAGS) -o kernel.bin boot.o kernel.o gdt.o gdt_flush.o idt.o isr.o pmm.o paging.o heap.o framebuffer.o graphics.o mouse.o window.o pit.o task.o sched.o rtc.o photo.o pci.o
+kernel.bin: boot.o kernel.o gdt.o gdt_flush.o idt.o isr.o pmm.o paging.o heap.o framebuffer.o graphics.o mouse.o window.o pit.o task.o sched.o rtc.o photo.o pci.o rtl8139.o linker.ld
+	ld $(LDFLAGS) -o kernel.bin boot.o kernel.o gdt.o gdt_flush.o idt.o isr.o pmm.o paging.o heap.o framebuffer.o graphics.o mouse.o window.o pit.o task.o sched.o rtc.o photo.o pci.o rtl8139.o
 
 os.iso: kernel.bin
 	mkdir -p isodir/boot/grub

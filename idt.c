@@ -231,6 +231,11 @@ void irq_handler(struct regs *r) {
         outb(0xA0, 0x20);
         outb(0x20, 0x20);
         mouse_handle_byte(data);
+    } else if (r->int_no == 43) { // IRQ11 RTL8139 - vector 43 = 0x28+3 (slave index 3)
+        extern void rtl8139_irq_handler(void);
+        outb(0xA0, 0x20); // EOI slave first, then master (same order as mouse)
+        outb(0x20, 0x20);
+        rtl8139_irq_handler();
     } else {
         if (r->int_no >= 40) outb(0xA0, 0x20);
         outb(0x20, 0x20);

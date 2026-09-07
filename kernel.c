@@ -13,6 +13,7 @@
 #include "pit.h"
 #include "task.h"
 #include "pci.h"
+#include "rtl8139.h"
 #include "buildstamp.h"
 
 static inline void outb(uint16_t port, uint8_t val) {
@@ -319,6 +320,12 @@ void kernel_main(uint32_t magic, uint32_t mbi_addr) {
     serial_puts("PCI: init (bus scan)...\n");
     pci_init();
     serial_puts("PCI: ready\n");
+
+    // RTL8139 Phase 2: bring-up (reset, buffers, IRQ plumbing). No packets yet.
+    // Safe no-op with log if Phase 1 found no card.
+    serial_puts("RTL8139: init...\n");
+    rtl8139_init();
+    serial_puts("RTL8139: ready\n");
 
     // Phase 15: PIT scheduler - must be after IDT/PIC and after tasks' stacks are mapped
     serial_puts("PIT: init 100Hz (divisor 11931 -> 0x2E9B, cmd 0x36 mode 3)\n");

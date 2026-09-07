@@ -7,6 +7,9 @@
 // The driver phase will use rtl8139_iobase()/rtl8139_irq() + bus/dev/fn.
 uint16_t pci_config_read_word(uint8_t bus, uint8_t dev, uint8_t fn, uint8_t offset);
 uint32_t pci_config_read_dword(uint8_t bus, uint8_t dev, uint8_t fn, uint8_t offset);
+// Full-dword read-modify-write preserving the other half (used for the
+// 16-bit command register at offset 0x04: read dword, patch low word, write).
+void pci_config_write_word(uint8_t bus, uint8_t dev, uint8_t fn, uint8_t offset, uint16_t val);
 
 // Full brute-force scan (bus 0-255, dev 0-31, fn 0-7, vendor != 0xFFFF):
 // logs every device, then reports the RTL8139 (10EC:8139) if present.
