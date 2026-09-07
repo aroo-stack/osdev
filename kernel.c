@@ -12,6 +12,7 @@
 #include "window.h"
 #include "pit.h"
 #include "task.h"
+#include "pci.h"
 #include "buildstamp.h"
 
 static inline void outb(uint16_t port, uint8_t val) {
@@ -312,6 +313,12 @@ void kernel_main(uint32_t magic, uint32_t mbi_addr) {
     serial_puts("MOUSE: init (IRQ12 vector 44)...\n");
     mouse_init();
     serial_puts("MOUSE: ready - move mouse over QEMU window and click\n");
+
+    // PCI bus enumeration + RTL8139 detection (detection only: ports 0xCF8/0xCFC,
+    // no init, no packets). Needs nothing but port I/O; placed with device inits.
+    serial_puts("PCI: init (bus scan)...\n");
+    pci_init();
+    serial_puts("PCI: ready\n");
 
     // Phase 15: PIT scheduler - must be after IDT/PIC and after tasks' stacks are mapped
     serial_puts("PIT: init 100Hz (divisor 11931 -> 0x2E9B, cmd 0x36 mode 3)\n");
