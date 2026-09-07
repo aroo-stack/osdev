@@ -18,6 +18,7 @@ void fb_blit_region(uint32_t *src, int x, int y, int w, int h); // src -> back, 
 void fb_swap_region(int x, int y, int w, int h); // back -> front, clipped rows
 uint32_t fb_get_width(void);
 uint32_t fb_get_height(void);
+uint32_t fb_get_pitch(void); // bytes per row (stride for row math)
 int fb_is_available(void);
 // double buffering
 int fb_is_double_buffered(void);

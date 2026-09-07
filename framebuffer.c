@@ -38,6 +38,7 @@ int fb_is_available(void){ return fb_available; }
 int fb_is_double_buffered(void){ return double_buffered; }
 uint32_t fb_get_width(void){ return fb_width; }
 uint32_t fb_get_height(void){ return fb_height; }
+uint32_t fb_get_pitch(void){ return fb_pitch; }
 
 // Internal helper: cached draw target - set once when double buffering enabled/disabled
 // This avoids per-pixel function call + branch (was fb_draw_target() per pixel in put_pixel loops)

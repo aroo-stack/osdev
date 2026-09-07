@@ -269,7 +269,7 @@ static void calculator_init_window(int nid){
     w_strcpy(w->title, "Calculator", 32);
     w->bg_color=0x00E8E8E8; w->title_color=0x00226644; w->border_color=0x00000000;
     w->visible=1; w->minimized=0; w->z=window_count;
-    w->has_textbox=0; w->has_settings=0;
+    w->has_textbox=0; w->has_settings=0; w->has_paint=0;
     w->has_calc=1;
     w->calc.display[0]='0'; w->calc.display[1]='.'; w->calc.display[2]='0'; w->calc.display[3]='0'; w->calc.display[4]=0; // "0.00"
     w->calc.acc=0; w->calc.op=0; w->calc.fresh=1; w->calc.err=0;
@@ -303,7 +303,7 @@ static void settings_init_window(int nid){
     w_strcpy(w->title, "Settings", 32);
     w->bg_color=0x00E0E4EA; w->title_color=0x00334155; w->border_color=0x00000000;
     w->visible=1; w->minimized=0; w->z=window_count;
-    w->has_textbox=0; w->has_calc=0; w->has_settings=1;
+    w->has_textbox=0; w->has_calc=0; w->has_settings=1; w->has_paint=0;
     w->has_button=1; w->num_btns=0;
     for(int i=0;i<3;i++){ // wallpaper row: y=52 h=30, x=20/136/252 w=106
         w->btns[i].x = 20+i*116; w->btns[i].y = 52;
@@ -351,6 +351,176 @@ static void settings_handle_button(struct window *w, int b){
     s_puts("SETTINGS: btn "); s_put_dec(b); s_puts(" wallpaper "); s_put_dec(wallpaper_preset);
     s_puts(" tz "); s_puts(timezone_label()); s_puts("\n");
 }
+// Paint-bounds + overlap helper for dirty-rect skip checks. Defined early -
+// first use is paint_blit below; set per-frame by window_do_redraw, full-screen
+// by boot init before its direct draw_all call.
+static int dr_x0 = 0, dr_y0 = 0, dr_x1 = 0, dr_y1 = 0;
+static int rects_overlap(int x,int y,int w,int h,int ox0,int oy0,int ox1,int oy1){
+    if(x+w<=ox0||ox1<=x||y+h<=oy0||oy1<=y) return 0; return 1;
+}
+// --- Paint: 5th app, NO background task (purely reactive like Calculator).
+// Canvas persistence model (differs from every other app): the framebuffer is
+// double-buffered and recomposited from wallpaper upward EVERY redraw, so the
+// drawing cannot live in any framebuffer - it needs its OWN persistent pixel
+// buffer. Like the wallpaper cache: PMM pages at a fixed vaddr (0x02000000,
+// 640x480x4 = 300 pages; wallpaper ends ~0x016E9000, task stacks start
+// 0x03000000, so no overlap), allocated+cleared once, kept for the session
+// (close keeps the drawing, same philosophy as Notes text). Every Paint
+// redraw blits the visible canvas portion into the window body; strokes write
+// into the buffer + dirty only the brush area (tiny rects, per dirty-rect).
+// Canvas content is FIXED 640x480 regardless of window size: resize just shows
+// more/less of it (top-left anchored, clipped) - no resampling, no corruption.
+#define PAINT_CW 640
+#define PAINT_CH 480
+#define PAINT_VADDR 0x02000000
+#define PAINT_BRUSH_R 3
+static uint32_t *paint_canvas = 0; // 640x480 packed rows (stride 640)
+static int paint_color_idx = 0; // default black
+static const uint32_t paint_colors[5] = {0x00000000, 0x00FF0000, 0x0000AA00, 0x000000FF, 0x00FFD800}; // Black Red Green Blue Yellow
+static int paint_last_x = 0, paint_last_y = 0, paint_last_valid = 0; // stroke interpolation state
+static void paint_ensure_canvas(void){
+    if(paint_canvas) return;
+    uint32_t need = PAINT_CW * PAINT_CH * 4;
+    uint32_t pages = (need + 0xFFF) >> 12; // 300
+    s_puts("PAINT: canvas alloc "); s_put_dec(pages); s_puts(" pages at 0x02000000\n");
+    for(uint32_t i=0;i<pages;i++){
+        uint32_t p = pmm_alloc_frame();
+        if(!p){ s_puts("PAINT: out of frames!\n"); paint_canvas = 0; return; }
+        paging_map(PAINT_VADDR + i*0x1000, p, 0x03);
+    }
+    paint_canvas = (uint32_t*)PAINT_VADDR;
+    // Clear to white paper.
+    for(uint32_t i=0;i<(uint32_t)PAINT_CW*PAINT_CH;i++) paint_canvas[i] = 0x00FFFFFF;
+    s_puts("PAINT: canvas ready (white)\n");
+}
+static void paint_clear_canvas(void){
+    paint_ensure_canvas(); if(!paint_canvas) return;
+    for(uint32_t i=0;i<(uint32_t)PAINT_CW*PAINT_CH;i++) paint_canvas[i] = 0x00FFFFFF;
+    s_puts("PAINT: cleared\n");
+}
+int paint_count_nonwhite(void){
+    if(!paint_canvas) return 0;
+    int n = 0;
+    for(uint32_t i=0;i<(uint32_t)PAINT_CW*PAINT_CH;i++) if(paint_canvas[i] != 0x00FFFFFF) n++;
+    return n;
+}
+// Filled-circle brush dot at buffer coords (clipped to buffer).
+static void paint_dot(int bx, int by){
+    if(!paint_canvas) return;
+    uint32_t col = paint_colors[paint_color_idx];
+    for(int dy=-PAINT_BRUSH_R; dy<=PAINT_BRUSH_R; dy++)
+        for(int dx=-PAINT_BRUSH_R; dx<=PAINT_BRUSH_R; dx++){
+            if(dx*dx+dy*dy > PAINT_BRUSH_R*PAINT_BRUSH_R) continue;
+            int px = bx+dx, py = by+dy;
+            if(px<0||py<0||px>=PAINT_CW||py>=PAINT_CH) continue;
+            paint_canvas[py*PAINT_CW+px] = col;
+        }
+}
+// Stroke entry: screen point while left held. Only paints when the topmost
+// window at the point IS Paint and the point lands in the buffer; otherwise
+// the pen lifts (leaving/entering window or occlusion ends the segment, so
+// re-entry doesn't draw a jump line). Always cheap: a few dozen pixels.
+void paint_stroke_at(int x, int y){
+    int pi = window_find_by_title("Paint");
+    if(pi==-1){ paint_last_valid=0; return; }
+    if(window_find_at(x,y) != pi){ paint_last_valid=0; return; }
+    struct window *w = &windows[pi];
+    int bx = x - (w->x+10), by = y - (w->y+66); // canvas origin in window
+    if(bx<0||by<0||bx>=PAINT_CW||by>=PAINT_CH){ paint_last_valid=0; return; }
+    if(paint_last_valid){
+        // Interpolate 2px steps so fast moves draw solid lines, not dots.
+        int dx = bx-paint_last_x, dy = by-paint_last_y;
+        int steps = (dx<0?-dx:dx) > (dy<0?-dy:dy) ? (dx<0?-dx:dx) : (dy<0?-dy:dy);
+        if(steps < 1) steps = 1;
+        if(steps > 200) steps = 200; // teleport guard (e.g. window moved mid-stroke)
+        for(int s=0;s<=steps;s++)
+            paint_dot(paint_last_x + dx*s/steps, paint_last_y + dy*s/steps);
+    } else {
+        paint_dot(bx, by);
+    }
+    paint_last_x = bx; paint_last_y = by; paint_last_valid = 1;
+    dirty_add(x-5, y-5, 10, 10); // brush r=3 + margin (also sets redraw flag)
+}
+void paint_end_stroke(void){ paint_last_valid = 0; }
+// Blit visible canvas portion into the window body. Visible rect = buffer
+// origin intersected with window client area (10px margins, below palette)
+// intersected with the frame's dirty bounds; fb clip guarantees the rest.
+// Top-left anchored: resize shows more/less, content never rescales.
+static void paint_blit(struct window *w){
+    paint_ensure_canvas(); if(!paint_canvas) return;
+    int ox = w->x+10, oy = w->y+66; // canvas screen origin
+    int x0 = ox, y0 = oy, x1 = ox+PAINT_CW, y1 = oy+PAINT_CH;
+    if(x1 > w->x+w->w-10) x1 = w->x+w->w-10; // window client clip
+    if(y1 > w->y+w->h-10) y1 = w->y+w->h-10;
+    if(x0 < w->x+10) x0 = w->x+10; if(y0 < oy) y0 = oy;
+    if(x0 < 0) x0 = 0; if(y0 < 0) y0 = 0; // screen clip
+    int fw = (int)fb_get_width(), fh = (int)fb_get_height();
+    if(x1 > fw) x1 = fw; if(y1 > fh) y1 = fh;
+    // Dirty-rect intersect (this loop bypasses fb_* clip): repaint only the
+    // changed portion of the canvas, not the whole 640x480 every stroke.
+    if(x0 < dr_x0) x0 = dr_x0; if(y0 < dr_y0) y0 = dr_y0;
+    if(x1 > dr_x1) x1 = dr_x1; if(y1 > dr_y1) y1 = dr_y1;
+    if(x0 >= x1 || y0 >= y1) return; // nothing visible
+    uint32_t *back = fb_get_back_buffer(); if(!back) return;
+    uint32_t stride_dw = fb_get_pitch() / 4;
+    for(int ry=y0; ry<y1; ry++){
+        uint32_t *s = paint_canvas + (uint32_t)(ry-oy) * PAINT_CW + (uint32_t)(x0-ox);
+        uint32_t *d = back + (uint32_t)ry * stride_dw + (uint32_t)x0;
+        uint32_t dwords = (uint32_t)(x1-x0);
+        __asm__ volatile("cld; rep movsl" : "+S"(s), "+D"(d), "+c"(dwords) : : "memory");
+    }
+    gfx_draw_rect_outline(x0, y0, x1-x0, y1-y0, 0x00000000); // frame the visible canvas
+}
+// Palette dispatch: buttons 0-4 set color, button 5 = Clear (white + dirty
+// the canvas screen area so the erase shows immediately).
+static void paint_handle_button(struct window *w, int b){
+    if(b < 5){
+        paint_color_idx = b;
+        s_puts("PAINT: color "); s_put_dec(b); s_puts("\n");
+    } else {
+        paint_clear_canvas();
+        dirty_add(w->x+10, w->y+66, PAINT_CW, PAINT_CH); // clamped to screen inside
+    }
+}
+// Window 440x400 at (700,150): palette row y=30 h=26 (6 x 60px buttons),
+// canvas origin (10,66). No task (purely reactive).
+static void paint_init_window(int nid){
+    struct window *w = &windows[nid];
+    static const char *pal[6] = {"Black", "Red", "Green", "Blue", "Yellow", "Clear"};
+    w->x=700; w->y=150; w->w=440; w->h=400;
+    w_strcpy(w->title, "Paint", 32);
+    w->bg_color=0x00E8E8E8; w->title_color=0x00772222; w->border_color=0x00000000;
+    w->visible=1; w->minimized=0; w->z=window_count;
+    w->has_textbox=0; w->has_calc=0; w->has_settings=0; w->has_paint=1;
+    w->has_button=1; w->num_btns=0;
+    for(int i=0;i<6;i++){
+        w->btns[i].x = 10+i*68; w->btns[i].y = 30;
+        w->btns[i].w = 60; w->btns[i].h = 26;
+        w_strcpy(w->btns[i].label, pal[i], 32);
+        w->btns[i].pressed = 0; w->btns[i].clicks = 0;
+        w->num_btns++;
+    }
+    w->task_counter=0;
+    paint_ensure_canvas();
+}
+// Open-or-refocus shared by desktop icon idx6 (window only, no task).
+static void paint_open_or_focus(void){
+    int found = window_find_by_title("Paint");
+    if(found != -1){
+        s_puts("DESKTOP: action Paint bring to front\n");
+        if(windows[found].minimized) windows[found].minimized = 0;
+        window_bring_to_front(found);
+        return;
+    }
+    s_puts("DESKTOP: action Paint create (was closed)\n");
+    if(window_count < MAX_WINDOWS){
+        int nid = window_count;
+        paint_init_window(nid);
+        z_order[window_count]=nid; window_count++; for(int i=0;i<window_count;i++) windows[z_order[i]].z=i;
+        s_puts("DESKTOP: created Paint\n"); window_invalidate(nid);
+    } else s_puts("DESKTOP: cannot create Paint - at max\n");
+}
+
 // FIXED-POINT model (no FPU anywhere: no CR0.EM handling, no FNINIT - out of
 // scope). All values stored as integers scaled by 100 (2 decimals): "1.55" is
 // the int 155, "10.00" is 1000. Arithmetic is plain integer math; the decimal
@@ -499,10 +669,9 @@ static void layout_sync_window(struct window *w){
             w->btns[b].y = y0 + r*(bh+8);
             w->btns[b].w = bw; w->btns[b].h = bh;
         }
-    } else if(w->has_button && !w->has_settings){
-        // Clicker ONLY (single centered button). Settings also has_button=1 but
-        // keeps its fixed grid from init - must be excluded or btns[0] ("Day")
-        // gets hijacked to the Clicker position every redraw.
+    } else if(w->has_button && !w->has_settings && !w->has_paint){
+        // Clicker ONLY (single centered button). Settings/Paint also have_button=1
+        // but keep fixed grids from init - excluded or btns[0] gets hijacked.
         int bw = w->w*30/100; if(bw < 120) bw = 120; if(bw > 320) bw = 320; if(bw > w->w-40) bw = w->w-40;
         int bh = w->h*10/100; if(bh < 30) bh = 30; if(bh > 64) bh = 64; if(bh > w->h-60) bh = w->h-60;
         if(bw < 1) bw = 1; if(bh < 1) bh = 1;
@@ -567,8 +736,11 @@ static void window_draw_single(int idx){
         int sc = calc_display_scale(dh);
         gfx_draw_string_scaled(dx + dw - 4 - dlen*8*sc, dy + (dh-8*sc)/2, w->calc.display, 0x00000000, sc);
     }
-    // Settings sections: titles + selection highlight. Active option read live
-    // from wallpaper_preset / tz_offset_hours (no duplicate state): green double
+        // Paint canvas blit (palette buttons drawn by generic window_draw_button above).
+    if(w->has_paint){
+        paint_blit(w);
+    }
+    // Settings sections: titles + selection highlight. Active option read live    // from wallpaper_preset / tz_offset_hours (no duplicate state): green double
     // outline around the selected button in each section. Setters flag redraw,
     // so highlight follows clicks immediately with no extra frames.
     if(w->has_settings){
@@ -775,8 +947,9 @@ void desktop_icons_init(void){
     desktop_icons[3].x = 20; desktop_icons[3].y = 340; w_strcpy(desktop_icons[3].label, "Notes", 32); desktop_icons[3].color = 0x00993333; desktop_icons[3].selected = 0;
     desktop_icons[4].x = 20; desktop_icons[4].y = 440; w_strcpy(desktop_icons[4].label, "Calculator", 32); desktop_icons[4].color = 0x00226644; desktop_icons[4].selected = 0;
     desktop_icons[5].x = 20; desktop_icons[5].y = 540; w_strcpy(desktop_icons[5].label, "Settings", 32); desktop_icons[5].color = 0x00334155; desktop_icons[5].selected = 0;
-    desktop_icon_count = 6;
-    s_puts("DESKTOP: icons init 6 at (20,40) New Window, (20,140) Task Manager, (20,240) Clicker, (20,340) Notes, (20,440) Calculator, (20,540) Settings\n");
+    desktop_icons[6].x = 20; desktop_icons[6].y = 640; w_strcpy(desktop_icons[6].label, "Paint", 32); desktop_icons[6].color = 0x00772222; desktop_icons[6].selected = 0;
+    desktop_icon_count = 7;
+    s_puts("DESKTOP: icons init 7 at (20,40) New Window, (20,140) Task Manager, (20,240) Clicker, (20,340) Notes, (20,440) Calculator, (20,540) Settings, (20,640) Paint\n");
 }
 // Notes icon: white notepad sheet with gray rules, teal top bar, silver spiral
 // binding, navy fountain pen, and a solid offset drop shadow. Painted with
@@ -954,12 +1127,28 @@ static void draw_settings_icon(int gx, int gy){
         fb_draw_rect(bx+3 + (r*5+2), ry, 4, 4, knobs[r]);
     }
 }
-// Paint-bounds + overlap helper for dirty-rect skip checks. Defined here
-// (before first use in desktop_icons_draw); set per-frame by window_do_redraw,
-// full-screen by boot init before its direct draw_all call.
-static int dr_x0 = 0, dr_y0 = 0, dr_x1 = 0, dr_y1 = 0;
-static int rects_overlap(int x,int y,int w,int h,int ox0,int oy0,int ox1,int oy1){
-    if(x+w<=ox0||ox1<=x||y+h<=oy0||oy1<=y) return 0; return 1;
+// Paint icon: white canvas sheet with red/green/blue paint dots and a brush
+// diagonal (brown handle, dark tip), plus solid offset drop shadow. Same 32x32
+// canvas and solid-primitive style as the other glyphs.
+static void draw_paint_icon(int gx, int gy){
+    uint32_t paper = 0x00F9F9FB;
+    uint32_t edge = 0x00000000;
+    uint32_t shadow = 0x00141824;
+    uint32_t handle = 0x008B5A2B;
+    int px = gx + 7, py = gy + 4; // 18x24 sheet centered in canvas
+    fb_draw_rect(px+2, py+2, 18, 24, shadow);
+    fb_draw_rect(px, py, 18, 24, paper);
+    gfx_draw_rect_outline(px, py, 18, 24, edge);
+    // paint dots: red/green/blue/yellow
+    fb_draw_rect(px+3, py+3, 4, 4, 0x00FF0000);
+    fb_draw_rect(px+11, py+3, 4, 4, 0x0000AA00);
+    fb_draw_rect(px+3, py+11, 4, 4, 0x000000FF);
+    fb_draw_rect(px+11, py+11, 4, 4, 0x00FFD800);
+    // brush diagonal: brown handle + dark tip
+    gfx_draw_line(px+2, py+22, px+14, py+10, handle);
+    gfx_draw_line(px+3, py+22, px+15, py+10, handle);
+    gfx_draw_line(px+14, py+10, px+16, py+8, 0x00222222);
+    fb_draw_rect(px+16, py+8, 1, 1, 0x00222222);
 }
 void desktop_icons_draw(void){
     if(!fb_is_available()) return;
@@ -975,6 +1164,7 @@ void desktop_icons_draw(void){
         else if(i==3){ draw_notes_icon(gx, gy); }
         else if(i==4){ draw_calc_icon(gx, gy); }
         else if(i==5){ draw_settings_icon(gx, gy); }
+        else if(i==6){ draw_paint_icon(gx, gy); }
         int len=0; while(ic->label[len] && len<32) len++;
         int tx = ix + (ICON_W - len*8)/2; int ty = iy + 4 + ICON_GLYPH + 6;
         if(ic->selected){ int bg_w = len*8 + 6; int bg_h = 10; int bg_x = tx - 3; int bg_y = ty - 1; fb_draw_rect(bg_x, bg_y, bg_w, bg_h, 0x000000FF); gfx_draw_string(tx, ty, ic->label, 0x00FFFFFF); }
@@ -1001,7 +1191,7 @@ int desktop_icon_handle_click(int x, int y){
         s_puts("DESKTOP: double-click icon "); s_put_dec(idx); s_puts("\n");
         for(int i=0;i<desktop_icon_count;i++) desktop_icons[i].selected = (i==idx); selected_icon = idx; last_click_icon = -1; last_click_tick = -1000;
         if(idx==0){ s_puts("DESKTOP: action New Window\n"); window_create_new(); }
-        else if(idx==1){ int found=-1; for(int i=0;i<window_count;i++) if(icon_streq(windows[i].title, "Task Manager")) { found=i; break; } if(found!=-1){ s_puts("DESKTOP: action Task Manager bring to front\n"); if(windows[found].minimized){ windows[found].minimized=0; s_puts("DESKTOP: unminimize Task Manager\n"); } window_bring_to_front(found); } else { s_puts("DESKTOP: action Task Manager create (was closed)\n"); if(window_count < MAX_WINDOWS){ int nid = window_count; windows[nid].x=600; windows[nid].y=100; windows[nid].w=300; windows[nid].h=200; w_strcpy(windows[nid].title, "Task Manager", 32); windows[nid].bg_color=0x00F0F0F0; windows[nid].title_color=0x00333333; windows[nid].border_color=0x00000000; windows[nid].visible=1; windows[nid].minimized=0; windows[nid].z=window_count; windows[nid].has_button=0; windows[nid].num_btns=0; windows[nid].has_textbox=0; windows[nid].has_calc=0; windows[nid].has_settings=0; windows[nid].task_counter=0; z_order[window_count]=nid; window_count++; for(int i=0;i<window_count;i++) windows[z_order[i]].z=i; s_puts("DESKTOP: created Task Manager\n"); window_invalidate(nid); } else s_puts("DESKTOP: cannot create Task Manager - at max\n"); } }
+        else if(idx==1){ int found=-1; for(int i=0;i<window_count;i++) if(icon_streq(windows[i].title, "Task Manager")) { found=i; break; } if(found!=-1){ s_puts("DESKTOP: action Task Manager bring to front\n"); if(windows[found].minimized){ windows[found].minimized=0; s_puts("DESKTOP: unminimize Task Manager\n"); } window_bring_to_front(found); } else { s_puts("DESKTOP: action Task Manager create (was closed)\n"); if(window_count < MAX_WINDOWS){ int nid = window_count; windows[nid].x=600; windows[nid].y=100; windows[nid].w=300; windows[nid].h=200; w_strcpy(windows[nid].title, "Task Manager", 32); windows[nid].bg_color=0x00F0F0F0; windows[nid].title_color=0x00333333; windows[nid].border_color=0x00000000; windows[nid].visible=1; windows[nid].minimized=0; windows[nid].z=window_count; windows[nid].has_button=0; windows[nid].num_btns=0; windows[nid].has_textbox=0; windows[nid].has_calc=0; windows[nid].has_settings=0; windows[nid].has_paint=0; windows[nid].task_counter=0; z_order[window_count]=nid; window_count++; for(int i=0;i<window_count;i++) windows[z_order[i]].z=i; s_puts("DESKTOP: created Task Manager\n"); window_invalidate(nid); } else s_puts("DESKTOP: cannot create Task Manager - at max\n"); } }
         else if(idx==2){ // Clicker
             int found=-1; for(int i=0;i<window_count;i++) if(icon_streq(windows[i].title, "Clicker")) { found=i; break; }
             if(found!=-1){ s_puts("DESKTOP: action Clicker bring to front\n"); if(windows[found].minimized){ windows[found].minimized=0; } window_bring_to_front(found); }
@@ -1023,7 +1213,7 @@ int desktop_icon_handle_click(int x, int y){
                     windows[nid].bg_color=0x00E0E0E0; windows[nid].title_color=0x00336699; windows[nid].border_color=0x00000000;
                     windows[nid].visible=1; windows[nid].minimized=0; windows[nid].z=window_count; windows[nid].has_button=1; windows[nid].num_btns=1;
                     windows[nid].btns[0].x=20; windows[nid].btns[0].y=40; windows[nid].btns[0].w=120; windows[nid].btns[0].h=30; w_strcpy(windows[nid].btns[0].label, "Click Me", 32); windows[nid].btns[0].pressed=0; windows[nid].btns[0].clicks=0;
-                    windows[nid].has_textbox=0; windows[nid].has_calc=0; windows[nid].has_settings=0; windows[nid].task_counter=0;
+                    windows[nid].has_textbox=0; windows[nid].has_calc=0; windows[nid].has_settings=0; windows[nid].has_paint=0; windows[nid].task_counter=0;
                     z_order[window_count]=nid; window_count++; for(int i=0;i<window_count;i++) windows[z_order[i]].z=i;
                     s_puts("DESKTOP: created Clicker\n"); window_invalidate(nid);
                 } else s_puts("DESKTOP: cannot create Clicker - at max\n");
@@ -1046,7 +1236,7 @@ int desktop_icon_handle_click(int x, int y){
                     windows[nid].x=250; windows[nid].y=180; windows[nid].w=400; windows[nid].h=300;
                     w_strcpy(windows[nid].title, "Notes", 32);
                     windows[nid].bg_color=0x00D0D0FF; windows[nid].title_color=0x00993333; windows[nid].border_color=0x00000000;
-                    windows[nid].visible=1; windows[nid].minimized=0; windows[nid].z=window_count; windows[nid].has_button=0; windows[nid].num_btns=0; windows[nid].has_textbox=1; windows[nid].has_calc=0; windows[nid].has_settings=0;
+                    windows[nid].visible=1; windows[nid].minimized=0; windows[nid].z=window_count; windows[nid].has_button=0; windows[nid].num_btns=0; windows[nid].has_textbox=1; windows[nid].has_calc=0; windows[nid].has_settings=0; windows[nid].has_paint=0;
                     windows[nid].tbox.x=20; windows[nid].tbox.y=40; windows[nid].tbox.w=360; windows[nid].tbox.h=60; windows[nid].tbox.max_len=512; notes_restore_to(nid); // placeholder rect: layout_sync recomputes; session text (empty on fresh boot)
                     windows[nid].task_counter=0;
                     z_order[window_count]=nid; window_count++; for(int i=0;i<window_count;i++) windows[z_order[i]].z=i;
@@ -1069,6 +1259,9 @@ int desktop_icon_handle_click(int x, int y){
         }
         else if(idx==5){ // Settings - window only, NO background task (purely reactive)
             settings_open_or_focus();
+        }
+        else if(idx==6){ // Paint - window only, NO background task (purely reactive)
+            paint_open_or_focus();
         }
         // No flag: every create/bring sub-action above invalidates its own rect.
         return 1;
@@ -1096,7 +1289,7 @@ void window_manager_init(void){
     windows[0].z = 0;
     windows[0].has_button = 1;
     windows[0].num_btns = 1; // single button at index 0 (was struct button btn)
-    windows[0].has_textbox = 0; windows[0].has_calc = 0; windows[0].has_settings = 0;
+    windows[0].has_textbox = 0; windows[0].has_calc = 0; windows[0].has_settings = 0; windows[0].has_paint = 0;
     windows[0].btns[0].x = 20; windows[0].btns[0].y = 40; windows[0].btns[0].w = 120; windows[0].btns[0].h = 30;
     w_strcpy(windows[0].btns[0].label, "Click Me", 32);
     windows[0].btns[0].pressed = 0;
@@ -1113,6 +1306,7 @@ void window_manager_init(void){
     windows[1].num_btns = 0;
     windows[1].has_calc = 0;
     windows[1].has_settings = 0;
+    windows[1].has_paint = 0;
     windows[1].has_textbox = 1;
     windows[1].tbox.x = 20; windows[1].tbox.y = 40; windows[1].tbox.w = 360; windows[1].tbox.h = 60; // placeholder: layout_sync_window recomputes from w/h on first redraw (-> 360x220 at 400x300)
     windows[1].tbox.max_len = 512;
@@ -1125,9 +1319,9 @@ void window_manager_init(void){
     windows[1].task_counter = 0;
 
     windows[2].x = 0; windows[2].y = 0; windows[2].w = 0; windows[2].h = 0;
-    windows[2].visible = 0; windows[2].minimized = 0; windows[2].has_button = 0; windows[2].num_btns = 0; windows[2].has_textbox = 0; windows[2].has_calc = 0; windows[2].has_settings = 0; windows[2].task_counter = 0;
+    windows[2].visible = 0; windows[2].minimized = 0; windows[2].has_button = 0; windows[2].num_btns = 0; windows[2].has_textbox = 0; windows[2].has_calc = 0; windows[2].has_settings = 0; windows[2].has_paint = 0; windows[2].task_counter = 0;
     windows[3].x = 0; windows[3].y = 0; windows[3].w = 0; windows[3].h = 0;
-    windows[3].visible = 0; windows[3].minimized = 0; windows[3].has_button = 0; windows[3].num_btns = 0; windows[3].has_textbox = 0; windows[3].has_calc = 0; windows[3].has_settings = 0; windows[3].task_counter = 0;
+    windows[3].visible = 0; windows[3].minimized = 0; windows[3].has_button = 0; windows[3].num_btns = 0; windows[3].has_textbox = 0; windows[3].has_calc = 0; windows[3].has_settings = 0; windows[3].has_paint = 0; windows[3].task_counter = 0;
 
     window_count = 2;
     // z_order 0..1 back->front corresponds to windows index order initially
@@ -1238,6 +1432,7 @@ int window_create_new(void){
     windows[idx].has_textbox = 0;
     windows[idx].has_calc = 0;
     windows[idx].has_settings = 0;
+    windows[idx].has_paint = 0;
     windows[idx].task_counter = 0;
     z_order[window_count] = idx;
     window_count++;
@@ -1806,10 +2001,12 @@ void window_update_resize(int x, int y){
     // so widgets never shrink to unusable/overlapping sizes:
     // Calculator grid needs bw>=40/bh>=24 -> 240x240; Clicker button 120x30
     // centered -> 200x140; Notes textbox + labels -> 200x140; Settings fixed
-    // grid (380x220, not synced) -> pinned at creation size.
+    // grid (380x220, not synced) -> pinned at creation size; Paint palette row
+    // needs 410px + margins -> 430x200 (canvas clips below that, by design).
     int min_w = WIN_MIN_W;
     int min_h = WIN_MIN_H;
-    if(w->has_settings){ min_w = 380; min_h = 220; }
+    if(w->has_paint){ min_w = 430; min_h = 200; }
+    else if(w->has_settings){ min_w = 380; min_h = 220; }
     else if(w->has_calc){ min_w = 240; min_h = 240; }
     else if(w->has_textbox){ if(min_w < 200) min_w = 200; if(min_h < 140) min_h = 140; }
     else if(w->has_button){ if(min_w < 200) min_w = 200; if(min_h < 140) min_h = 140; }
@@ -2148,6 +2345,8 @@ int window_handle_button_up(int x, int y){
             calculator_handle_button(w, pressed_b);
         } else if(w->has_settings){
             settings_handle_button(w, pressed_b);
+        } else if(w->has_paint){
+            paint_handle_button(w, pressed_b);
         } else {
             w->btns[pressed_b].clicks++;
         char buf[32];

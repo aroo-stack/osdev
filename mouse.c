@@ -306,6 +306,21 @@ void mouse_handle_byte(uint8_t data){
                 cursor_draw(mouse_x, mouse_y);
                 cursor_swap_boxes(ox, oy, new_x, new_y);
             }
+            // Pen lifts on every left release (ends interpolation segment).
+            paint_end_stroke();
+            __asm__ volatile("sti");
+        } else if(moved && (buttons & 0x01) && !window_is_dragging() && !window_is_resizing()){
+            // Left HELD + moving, not title-dragging/resizing: Paint stroke.
+            // (dragging/resizing branches above own this pattern when active.)
+            // Canvas write is a few dozen pixels - safe directly in IRQ; the
+            // stroke dirties its tiny rect so the redraw actually shows it.
+            // Cursor still must track: dirty its box like the moved-only path.
+            __asm__ volatile("cli");
+            mouse_x = new_x; mouse_y = new_y;
+            if(fb_is_available()){
+                paint_stroke_at(new_x, new_y);
+                dirty_add(new_x, new_y, CURSOR_W, CURSOR_H);
+            }
             __asm__ volatile("sti");
         } else if(moved && fb_is_available()){
             // Defer even simple moves to main loop to avoid race with window's textbox cursor and double-buffer save/restore.

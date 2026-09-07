@@ -12,7 +12,7 @@
 #define RESIZE_HANDLE 12
 #define WIN_MIN_W 150
 #define WIN_MIN_H 100
-#define MAX_ICONS 6
+#define MAX_ICONS 7
 #define ICON_W 64
 #define ICON_H 64
 #define ICON_GLYPH 32
@@ -60,6 +60,7 @@ struct window {
     struct calc_state calc; // meaningful only when has_calc == 1
     int has_calc; // 1 = Calculator app window (no background task, purely reactive)
     int has_settings; // 1 = Settings app window (no task; multi-button option grid)
+    int has_paint; // 1 = Paint app window (no task; palette buttons + canvas)
     volatile int task_counter; // owned by Clicker/Notes tasks, drawn by GUI task - single-word atomic
 };
 extern struct window windows[];
@@ -95,6 +96,11 @@ int context_menu_handle_click(int x, int y); // left-click: item action + close,
 int context_menu_handle_rightclick(int x, int y); // right-press: close if open, open if empty desktop
 void context_menu_draw(void); // drawn last (above taskbar)
 
+// Paint app: persistent canvas + stroke input (see window.c for memory layout).
+// Canvas content survives redraws/ moves (global buffer); close keeps it too.
+void paint_stroke_at(int x, int y); // left-held stroke point (screen coords)
+void paint_end_stroke(void); // lift pen (call on left release)
+int paint_count_nonwhite(void); // debug/test: count drawn pixels
 // desktop icons - part of desktop layer under windows
 struct desktop_icon {
     int x, y; // absolute desktop position (top-left of hit box)
