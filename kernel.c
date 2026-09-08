@@ -327,6 +327,12 @@ void kernel_main(uint32_t magic, uint32_t mbi_addr) {
     rtl8139_init();
     serial_puts("RTL8139: ready\n");
 
+    // RTL8139 Phase 3: transmit one real broadcast frame, poll TOK.
+    // Safe no-op with log if Phase 2 didn't complete.
+    serial_puts("RTL8139: send test...\n");
+    rtl8139_send_test();
+    serial_puts("RTL8139: send test done\n");
+
     // Phase 15: PIT scheduler - must be after IDT/PIC and after tasks' stacks are mapped
     serial_puts("PIT: init 100Hz (divisor 11931 -> 0x2E9B, cmd 0x36 mode 3)\n");
     pit_init(100);

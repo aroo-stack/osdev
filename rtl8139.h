@@ -11,5 +11,8 @@ void rtl8139_init(void);
 void rtl8139_irq_handler(void);
 // I/O base for Phase 3 (0 if absent or BAR0 isn't I/O type).
 uint32_t rtl8139_iobase(void);
+// Phase 3: build + transmit one broadcast test frame, poll TOK. Safe no-op
+// if init didn't complete. Enables IMR TOK so IRQ43 also fires.
+void rtl8139_send_test(void);
 
 #endif
