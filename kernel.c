@@ -333,6 +333,12 @@ void kernel_main(uint32_t magic, uint32_t mbi_addr) {
     rtl8139_send_test();
     serial_puts("RTL8139: send test done\n");
 
+    // RTL8139 Phase 4 trigger: DHCP discover -> QEMU user-net DHCPOFFER.
+    // The offer arrives asynchronously via ROK IRQ (drain loop logs it).
+    serial_puts("RTL8139: dhcp discover...\n");
+    rtl8139_send_dhcp_discover();
+    serial_puts("RTL8139: dhcp discover sent\n");
+
     // Phase 15: PIT scheduler - must be after IDT/PIC and after tasks' stacks are mapped
     serial_puts("PIT: init 100Hz (divisor 11931 -> 0x2E9B, cmd 0x36 mode 3)\n");
     pit_init(100);
@@ -398,6 +404,9 @@ void kernel_main(uint32_t magic, uint32_t mbi_addr) {
         // from the copy itself; single full repaint only at the swap). Click
         // handler only starts the job, so switching feels instant.
         wallpaper_copy_poll();
+        // RTL8139 deferred RX drain: parses packets queued by ROK IRQ once
+        // their DMA has settled (>=1 PIT tick later). No-op when idle.
+        rtl8139_poll_rx();
         // Task Manager live refresh - every ~20 iterations (~0.5s) to update tick counts without constant redraw
         // Chosen over every loop (60Hz full redraw = 180MB/s) to keep responsiveness, vs every second would be too laggy to watch counts climb
         // Dynamic: find Task Manager by title, not hardcoded index 3 / count 4 (now boots with 2 windows)
