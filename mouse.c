@@ -176,6 +176,12 @@ void mouse_handle_byte(uint8_t data){
             }
         }
         g_last_tsc = cur_tsc;
+        // Throttled packet log (%20, like the TSC line above): logging every
+        // packet (~40 bytes ≈ 3.5ms at 115200) starves the main loop under
+        // fast motion, letting dirty unions grow into giant catch-up frames.
+        // Every 20th packet still shows deltas/buttons/pos for debugging.
+        { static int pkt_log_cnt=0;
+          if((++pkt_log_cnt % 20)==0){
         s_puts("MOUSE: dx=");
         s_put_dec(dx);
         s_puts(" dy=");
@@ -185,6 +191,8 @@ void mouse_handle_byte(uint8_t data){
         s_puts(" pos=");
         s_put_dec(new_x); s_putc(','); s_put_dec(new_y);
         s_puts("\n");
+          }
+        }
         int left_pressed = (buttons & 0x01) && !(prev_buttons & 0x01);
         int left_released = !(buttons & 0x01) && (prev_buttons & 0x01);
         int right_pressed = (buttons & 0x02) && !(prev_buttons & 0x02); // right edge for context menu

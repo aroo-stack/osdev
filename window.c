@@ -1939,11 +1939,19 @@ void window_manager_draw_all(void){
         context_menu_draw(); // topmost layer (above taskbar)
     uint64_t t_win1 = rdtsc();
     last_windows_cycles = t_win1 - t_win0;
+    // Throttled frame log (%10, matching the WM_REDRAW summary cadence): this
+    // line fired EVERY redraw (~40 bytes ≈ 3.5ms), amplifying starvation under
+    // flood - the redraw it logs delays the next redraw. Frequency math for
+    // measurements: count these lines x10 over the run duration.
+    { static int drew_log_cnt=0;
+      if((++drew_log_cnt % 10)==0){
     s_puts("WM: drew windows back->front z=[");
     for(int i=0;i<window_count;i++){ s_put_dec(z_order[i]); if(i<window_count-1) s_putc(','); }
     s_puts("] minimized: ");
     for(int i=0;i<window_count;i++){ s_put_dec(windows[i].minimized); if(i<window_count-1) s_putc(','); }
     s_puts("\n");
+      }
+    }
     // Per-frame breakdown (wallpaper vs windows) is logged in window_do_redraw, not here to keep serial clean
 }
 
