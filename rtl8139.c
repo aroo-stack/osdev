@@ -177,6 +177,76 @@ static void s_put_mac(uint8_t *m){
 // program (next - 16) mod 8192 - the chip trails the true position by 16.
 // Stops on empty (BUFE), invalid header (no blind consuming of garbage),
 // or 16 packets (livelock guard).
+// Phase 5: network configuration from the DHCP offer ("poor man's DHCP":
+// parse + store the offer, no REQUEST/ACK exchange - stated simplification,
+// revisit if SLIRP ever stops honoring bare discovers).
+// Layout per RFC 2131 (BOOTP base) + RFC 2132 (options), verified via excerpts:
+//   eth[14] | IPv4 (IHL from low nibble of byte 0 - NEVER assumed 20) |
+//   UDP sport 67/dport 68 | DHCP: op(0) htype hlen hops xid(4-7) ...
+//   yiaddr = DHCP+16 (our offered IP) | options from DHCP+236: magic
+//   99.130.83.99 then TLV (tag, len, value; 0 = pad, 255 = end).
+//   option 53 len 1: 1=DISCOVER 2=OFFER (accept 5=ACK too: SLIRP answers our
+//   discover with ACK type - observed on the wire, logged verbatim).
+//   option 1 = subnet mask, 3 = router list (take first), 54 = server id.
+// Every read is bounds-checked against framelen (no trust in option lens).
+uint8_t net_our_ip[4] = {0,0,0,0};
+uint8_t net_mask[4] = {0,0,0,0};
+uint8_t net_gw[4] = {0,0,0,0};
+uint8_t net_server[4] = {0,0,0,0};
+int net_configured = 0;
+static void s_put_ip(uint8_t *a){
+    s_put_dec(a[0]); s_putc('.'); s_put_dec(a[1]); s_putc('.');
+    s_put_dec(a[2]); s_putc('.'); s_put_dec(a[3]);
+}
+static void parse_dhcp_offer(uint8_t *f, int framelen){
+    int ip_off = 14;
+    int ihl = f[ip_off] & 0x0F;
+    if(ihl < 5) return; // nonsense header, ignore
+    int ip_len = ihl * 4;
+    int udp_off = ip_off + ip_len;
+    if(framelen < udp_off + 8) return;
+    if(f[udp_off]!=0 || f[udp_off+1]!=67 || f[udp_off+2]!=0 || f[udp_off+3]!=68) return;
+    int dh = udp_off + 8;
+    if(framelen < dh + 236 + 4) return; // fixed part + magic
+    if(f[dh]!=2) { s_puts("RTL8139: DHCP not a reply (op!=2), ignore\n"); return; }
+    if(f[dh+236]!=99 || f[dh+237]!=130 || f[dh+238]!=83 || f[dh+239]!=99){
+        s_puts("RTL8139: DHCP bad magic, ignore\n"); return;
+    }
+    uint32_t xid = ((uint32_t)f[dh+4]<<24)|((uint32_t)f[dh+5]<<16)|((uint32_t)f[dh+6]<<8)|f[dh+7];
+    if(xid != 0x12345678){ s_puts("RTL8139: DHCP XID mismatch, ignore\n"); return; }
+    uint8_t yi[4]; for(int i=0;i<4;i++) yi[i] = f[dh+16+i]; // yiaddr (NOT +12: that's ciaddr, zeros here)
+    uint8_t mask[4] = {0,0,0,0}, gw[4] = {0,0,0,0}, srv[4] = {0,0,0,0};
+    int msgtype = -1;
+    int p = dh + 240; // options start after 236 fixed + 4 magic
+    int end = framelen; // frame length bounds everything (f has framelen bytes)
+    while(p < end){
+        uint8_t tag = f[p];
+        if(tag == 255) break; // end
+        if(tag == 0){ p++; continue; } // pad
+        if(p + 1 >= end) break; // truncated len byte
+        uint8_t len = f[p+1];
+        if(p + 2 + len > end) break; // overrun: stop, keep what we have
+        if(tag == 53 && len >= 1) msgtype = f[p+2];
+        else if(tag == 1 && len == 4) for(int i=0;i<4;i++) mask[i] = f[p+2+i];
+        else if(tag == 3 && len >= 4) for(int i=0;i<4;i++) gw[i] = f[p+2+i];
+        else if(tag == 54 && len == 4) for(int i=0;i<4;i++) srv[i] = f[p+2+i];
+        p += 2 + len;
+    }
+    if(msgtype != 2 && msgtype != 5){
+        s_puts("RTL8139: DHCP msgtype "); s_put_dec((uint32_t)(msgtype<0?999:msgtype));
+        s_puts(" (not OFFER/ACK), ignore\n"); return;
+    }
+    for(int i=0;i<4;i++){
+        net_our_ip[i] = yi[i]; net_mask[i] = mask[i];
+        net_gw[i] = gw[i]; net_server[i] = srv[i];
+    }
+    net_configured = 1;
+    s_puts("RTL8139: NET configured ("); s_puts(msgtype==2?"OFFER":"ACK");
+    s_puts(") ip="); s_put_ip(net_our_ip);
+    s_puts(" mask="); s_put_ip(net_mask);
+    s_puts(" gw="); s_put_ip(net_gw);
+    s_puts(" server="); s_put_ip(net_server); s_puts("\n");
+}
 static void rtl8139_drain_rx(void){
     for(int n=0; n<16; n++){
         if(rtl_inb((uint16_t)(io_base + RTL_REG_CMD)) & RTL_CMD_BUFE) break; // empty
@@ -211,6 +281,11 @@ static void rtl8139_drain_rx(void){
             s_puts(xid==0x12345678 ? " (OUR discover reply!)" : " (not ours)");
         }
         s_puts("\n");
+        // Phase 5: full parse + store (self-validating: op, magic, XID, bounds).
+        // Gated on IPv4/UDP-67-68 shape so ARP etc. never reach the parser.
+        if(framelen >= 290 && f[12]==0x08 && f[13]==0x00 && f[23]==17 &&
+           f[34]==0 && f[35]==67 && f[36]==0 && f[37]==68)
+            parse_dhcp_offer(f, framelen);
         int next = (off + 4 + rawlen + 3) & ~3;
         next %= RTL_RX_RING;
         int capr = (next + RTL_RX_RING - 16) % RTL_RX_RING;
