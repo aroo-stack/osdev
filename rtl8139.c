@@ -266,6 +266,9 @@ static void rtl8139_drain_rx(void){
         s_puts(" dst="); s_put_mac(&f[0]);
         s_puts(" src="); s_put_mac(&f[6]);
         s_puts(" type="); s_put_hex16((uint16_t)((uint16_t)f[12]<<8 | f[13]));
+        // ARP frames go to the ARP handler (own length check inside).
+        if(f[12]==0x08 && f[13]==0x06 && framelen >= 42)
+            rtl8139_handle_arp(f, framelen);
         // DHCP sniff: IPv4/UDP server(67)->client(68) + magic cookie at DHCP+236
         // -> log XID (+ match flag). Offsets from frame start: eth 14, IP 20,
         // UDP 8, DHCP fixed 236; XID at DHCP+4, magic at DHCP+236.
@@ -485,4 +488,153 @@ void rtl8139_send_dhcp_discover(void){
         s_puts(" TSD1="); s_put_hex32(tsd);
         s_puts((tsd & RTL_TSD_TOK) ? " OK (discover on wire, offer should follow)\n" : " TIMEOUT!\n");
     }
+}
+
+// Phase 6: ARP (RFC 826, verified via excerpts). Frame: eth dst(6)/src(6)/
+// type 0x0806, then htype(2)=1, ptype(2)=0x0800, hlen(1)=6, plen(1)=4,
+// op(2)=1 request / 2 reply, sha(6), spa(4), tha(6), tpa(4) = 28B payload,
+// 42B frame, zero-padded to the 60B minimum (card CRCs itself).
+// TX descriptors: pairs 0,1 consumed by verified Phase-3/4 sends; new sends
+// round-robin from pair 2 (static counter, %4 - reuse after idle is legal).
+static int tx_next = 2;
+static struct { uint8_t ip[4]; uint8_t mac[6]; int valid; } arp_table[ARP_TABLE_SIZE];
+static uint8_t arp_frame[64]; // build buffer (.bss, phys==virt)
+
+int arp_lookup(uint8_t *ip, uint8_t *mac_out){
+    for(int i=0;i<ARP_TABLE_SIZE;i++){
+        if(!arp_table[i].valid) continue;
+        if(arp_table[i].ip[0]==ip[0] && arp_table[i].ip[1]==ip[1] &&
+           arp_table[i].ip[2]==ip[2] && arp_table[i].ip[3]==ip[3]){
+            for(int k=0;k<6;k++) mac_out[k] = arp_table[i].mac[k];
+            return 1;
+        }
+    }
+    return 0;
+}
+
+static void arp_store(uint8_t *ip, uint8_t *mac){
+    int slot = -1;
+    for(int i=0;i<ARP_TABLE_SIZE;i++){
+        if(arp_table[i].valid &&
+           arp_table[i].ip[0]==ip[0] && arp_table[i].ip[1]==ip[1] &&
+           arp_table[i].ip[2]==ip[2] && arp_table[i].ip[3]==ip[3]){ slot = i; break; }
+        if(slot==-1 && !arp_table[i].valid) slot = i;
+    }
+    if(slot==-1) slot = 0; // full: evict slot 0 (documented simple policy)
+    for(int i=0;i<4;i++) arp_table[slot].ip[i] = ip[i];
+    for(int i=0;i<6;i++) arp_table[slot].mac[i] = mac[i];
+    arp_table[slot].valid = 1;
+    s_puts("RTL8139: ARP cache store "); s_put_ip(ip);
+    s_puts(" -> "); s_put_mac(mac); s_puts(" (slot "); s_put_dec((uint32_t)slot); s_puts(")\n");
+}
+
+// Raw transmit on the next round-robin pair. Returns 1 if TOK set (else 0).
+static int rtl8139_tx_raw(uint8_t *frame, int len){
+    int d = tx_next % 4; tx_next++;
+    uint32_t tsad = (uint32_t)(io_base + 0x20 + d*4);
+    uint32_t tsd = (uint32_t)(io_base + 0x10 + d*4);
+    for(int i=0;i<len;i++) tx_buffer[i] = frame[i]; // stage via DMA buffer
+    rtl_outl((uint16_t)tsad, (uint32_t)tx_buffer);
+    rtl_outl((uint16_t)tsd, (uint32_t)len); // OWN=0 -> GO
+    uint32_t v = 0;
+    int polls = 0;
+    while(polls < 1000000){
+        v = rtl_inl((uint16_t)tsd);
+        if(v & RTL_TSD_TOK) break;
+        polls++;
+    }
+    s_puts("RTL8139: TX pair "); s_put_dec((uint32_t)d);
+    s_puts(" len "); s_put_dec((uint32_t)len);
+    s_puts((v & RTL_TSD_TOK) ? " TOK OK\n" : " TOK TIMEOUT!\n");
+    return (v & RTL_TSD_TOK) != 0;
+}
+
+static void read_our_mac(uint8_t *mac){
+    uint16_t w0 = rtl_inw((uint16_t)(io_base+0x00));
+    uint16_t w1 = rtl_inw((uint16_t)(io_base+0x02));
+    uint16_t w2 = rtl_inw((uint16_t)(io_base+0x04));
+    mac[0]=(uint8_t)w0; mac[1]=(uint8_t)(w0>>8);
+    mac[2]=(uint8_t)w1; mac[3]=(uint8_t)(w1>>8);
+    mac[4]=(uint8_t)w2; mac[5]=(uint8_t)(w2>>8);
+}
+
+void rtl8139_send_arp_request(uint8_t *tip){
+    if(!initialized || !io_base || !net_configured){
+        s_puts("RTL8139: arp request skipped (not ready: init/ip?)\n");
+        return;
+    }
+    uint8_t mac[6]; read_our_mac(mac);
+    uint8_t *a = arp_frame;
+    for(int i=0;i<6;i++) a[i] = 0xFF; // broadcast (don't know MAC yet)
+    for(int i=0;i<6;i++) a[6+i] = mac[i];
+    a[12] = 0x08; a[13] = 0x06; // EtherType ARP
+    a[14]=0; a[15]=1; // htype Ethernet
+    a[16]=0x08; a[17]=0x00; // ptype IPv4
+    a[18]=6; a[19]=4; // hlen/plen
+    a[20]=0; a[21]=1; // op = request
+    for(int i=0;i<6;i++) a[22+i] = mac[i]; // sha
+    for(int i=0;i<4;i++) a[28+i] = net_our_ip[i]; // spa
+    for(int i=0;i<6;i++) a[32+i] = 0; // tha unknown
+    for(int i=0;i<4;i++) a[38+i] = tip[i]; // tpa
+    for(int i=42;i<60;i++) a[i] = 0; // pad to 60B minimum
+    s_puts("RTL8139: ARP request who-has "); s_put_ip(tip); s_puts(" tell "); s_put_ip(net_our_ip); s_puts("\n");
+    rtl8139_tx_raw(a, 60);
+}
+
+// Parse + handle one ARP frame (already bounds-checked to >=42B by caller).
+// Replies: merge sender mapping (RFC 826 merge rule), log gateway match.
+// Requests for OUR ip: build + send reply (sha/spa = us, tha/tpa = asker).
+void rtl8139_handle_arp(uint8_t *f, int framelen){
+    (void)framelen;
+    if(f[14]!=0 || f[15]!=1 || f[16]!=0x08 || f[17]!=0x00 || f[18]!=6 || f[19]!=4){
+        s_puts("RTL8139: ARP non-Ethernet/IPv4 params, ignore\n"); return;
+    }
+    int op = ((int)f[20] << 8) | f[21];
+    uint8_t *sha = &f[22], *spa = &f[28], *tha = &f[32], *tpa = &f[38];
+    if(op == 2){ // reply
+        s_puts("RTL8139: ARP reply ");
+        s_put_ip(spa); s_puts(" is-at "); s_put_mac(sha);
+        int for_us = net_configured &&
+            tpa[0]==net_our_ip[0] && tpa[1]==net_our_ip[1] &&
+            tpa[2]==net_our_ip[2] && tpa[3]==net_our_ip[3];
+        s_puts(for_us ? " (for us)" : " (not for us, cached anyway)");
+        s_puts("\n");
+        arp_store(spa, sha);
+    } else if(op == 1){ // request
+        s_puts("RTL8139: ARP request who-has "); s_put_ip(tpa);
+        s_puts(" from "); s_put_mac(sha); s_puts("\n");
+        arp_store(spa, sha); // merge rule: learn sender even from requests
+        if(!net_configured){ s_puts("RTL8139: no IP yet, not answering\n"); return; }
+        if(tpa[0]!=net_our_ip[0] || tpa[1]!=net_our_ip[1] ||
+           tpa[2]!=net_our_ip[2] || tpa[3]!=net_our_ip[3]){
+            s_puts("RTL8139: not asking for us, no reply\n"); return;
+        }
+        uint8_t mac[6]; read_our_mac(mac);
+        uint8_t *a = arp_frame;
+        for(int i=0;i<6;i++) a[i] = sha[i]; // eth dst = asker
+        for(int i=0;i<6;i++) a[6+i] = mac[i];
+        a[12] = 0x08; a[13] = 0x06;
+        a[14]=0; a[15]=1; a[16]=0x08; a[17]=0x00; a[18]=6; a[19]=4;
+        a[20]=0; a[21]=2; // op = reply
+        for(int i=0;i<6;i++) a[22+i] = mac[i]; // sha = us
+        for(int i=0;i<4;i++) a[28+i] = net_our_ip[i]; // spa = us
+        for(int i=0;i<6;i++) a[32+i] = sha[i]; // tha = asker
+        for(int i=0;i<4;i++) a[38+i] = spa[i]; // tpa = asker
+        for(int i=42;i<60;i++) a[i] = 0;
+        s_puts("RTL8139: ARP answering with our MAC\n");
+        rtl8139_tx_raw(a, 60);
+    } else {
+        s_puts("RTL8139: ARP unknown op, ignore\n");
+    }
+}
+
+// Manual RX pump for pre-sti boot waits: check ISR directly (no interrupts
+// needed - pure PIO), ack + drain. No EOI here (no IRQ context to end;
+// a pending PIC IRQ will fire normally on sti and just find nothing new).
+void rtl8139_pump_rx(void){
+    if(!initialized || !io_base) return;
+    uint16_t isr = rtl_inw((uint16_t)(io_base + RTL_REG_ISR));
+    if(!(isr & 0x01)) return; // no receive pending
+    rtl_outw((uint16_t)(io_base + RTL_REG_ISR), isr); // ack first (QEMU rule)
+    rtl8139_drain_rx();
 }

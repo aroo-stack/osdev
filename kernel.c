@@ -24,6 +24,11 @@ static inline uint8_t inb(uint16_t port) {
     __asm__ volatile ("inb %1, %0" : "=a"(ret) : "Nd"(port));
     return ret;
 }
+static inline uint16_t inw(uint16_t port) {
+    uint16_t ret;
+    __asm__ volatile ("inw %1, %0" : "=a"(ret) : "Nd"(port));
+    return ret;
+}
 
 static void serial_init(void) {
     outb(0x3F8 + 1, 0x00);
@@ -338,6 +343,68 @@ void kernel_main(uint32_t magic, uint32_t mbi_addr) {
     serial_puts("RTL8139: dhcp discover...\n");
     rtl8139_send_dhcp_discover();
     serial_puts("RTL8139: dhcp discover sent\n");
+
+    // RTL8139 Phase 6: ARP for the gateway + answer-path test.
+    // NOTE on waiting pre-sti: PIT ticks may be frozen and the main-loop drain
+    // doesn't run yet, so these bounded raw loops pump the card directly
+    // (rtl8139_pump_rx: ISR check + drain, no interrupts needed). Bounds keep
+    // a dead network from hanging boot.
+    {
+        extern int net_configured;
+        extern uint8_t net_gw[4];
+        int spins = 0;
+        while(!net_configured && spins < 2000000){ rtl8139_pump_rx(); spins++; }
+        serial_puts("RTL8139: wait-config ");
+        serial_puts(net_configured?"OK":"TIMEOUT (no IP, skipping ARP)");
+        serial_puts("\n");
+        if(net_configured){
+            uint8_t m[6];
+            rtl8139_send_arp_request(net_gw);
+            spins = 0;
+            while(!arp_lookup(net_gw, m) && spins < 2000000){ rtl8139_pump_rx(); spins++; }
+            serial_puts("RTL8139: wait-arp-reply ");
+            if(arp_lookup(net_gw, m)){
+                serial_puts("HIT gw=");
+                for(int i=0;i<6;i++){
+                    uint8_t b = m[i];
+                    serial_putc(b>>4<10?'0'+(b>>4):'A'+(b>>4)-10);
+                    serial_putc((b&0xF)<10?'0'+(b&0xF):'A'+(b&0xF)-10);
+                    if(i<5) serial_putc(':');
+                }
+                serial_puts("\n");
+            } else serial_puts("MISS (timeout)\n");
+            // Synthetic answer-path test: fake incoming request FOR our IP from
+            // 10.0.2.99 (02:00:00:00:00:99). Real QEMU peers never ARP for us,
+            // so this exercises parse->build->transmit of the reply directly.
+            extern uint8_t net_our_ip[4];
+            extern uint32_t rtl8139_iobase(void);
+            {
+                static uint8_t fake[60];
+                uint32_t io = rtl8139_iobase();
+                uint8_t mac[6];
+                uint16_t w0 = inw((uint16_t)io);
+                uint16_t w1 = inw((uint16_t)(io+2));
+                uint16_t w2 = inw((uint16_t)(io+4));
+                mac[0]=(uint8_t)w0; mac[1]=(uint8_t)(w0>>8);
+                mac[2]=(uint8_t)w1; mac[3]=(uint8_t)(w1>>8);
+                mac[4]=(uint8_t)w2; mac[5]=(uint8_t)(w2>>8);
+                for(int i=0;i<6;i++) fake[i] = mac[i]; // eth dst = us
+                for(int i=0;i<6;i++) fake[6+i] = mac[i]; // eth src filler (overwritten below)
+                fake[12]=0x08; fake[13]=0x06;
+                fake[14]=0; fake[15]=1; fake[16]=0x08; fake[17]=0x00;
+                fake[18]=6; fake[19]=4; fake[20]=0; fake[21]=1; // op = request
+                fake[22]=0x02; fake[23]=0x00; fake[24]=0x00; fake[25]=0x00; fake[26]=0x00; fake[27]=0x99; // sha
+                fake[28]=10; fake[29]=0; fake[30]=2; fake[31]=99; // spa 10.0.2.99
+                for(int i=0;i<6;i++) fake[32+i]=0; // tha
+                for(int i=0;i<4;i++) fake[38+i]=net_our_ip[i]; // tpa = us
+                for(int i=42;i<60;i++) fake[i]=0;
+                for(int i=0;i<6;i++) fake[6+i] = fake[22+i]; // eth src = requester
+                serial_puts("RTL8139: synthetic ARP request for us (from 10.0.2.99)...\n");
+                rtl8139_handle_arp(fake, 60);
+                serial_puts("RTL8139: synthetic answer test done\n");
+            }
+        }
+    }
 
     // Phase 15: PIT scheduler - must be after IDT/PIC and after tasks' stacks are mapped
     serial_puts("PIT: init 100Hz (divisor 11931 -> 0x2E9B, cmd 0x36 mode 3)\n");

@@ -17,6 +17,14 @@ void rtl8139_send_test(void);
 // Phase 4 trigger: DHCP discover broadcast (elicits DHCPOFFER from QEMU
 // user-net). Uses TX descriptor pair 1 (pair 0 consumed by send_test).
 void rtl8139_send_dhcp_discover(void);
+// Phase 6: ARP cache + request/reply. Table holds a few IP->MAC mappings
+// (same simple-global-state pattern as net_* config). Table lookup for TX
+// path use; store on valid replies/requests (RFC 826 merge rule).
+#define ARP_TABLE_SIZE 8
+int arp_lookup(uint8_t *ip, uint8_t *mac_out); // 1 if found (mac filled)
+void rtl8139_send_arp_request(uint8_t *tip); // broadcast "who has tip?" (needs net_configured)
+void rtl8139_handle_arp(uint8_t *f, int framelen); // parse + cache + answer-if-for-us
+void rtl8139_pump_rx(void); // poll ISR + drain without interrupts (boot waits)
 // Phase 5: parsed network configuration ("poor man's DHCP": offer parsed +
 // stored, no REQUEST/ACK exchange - noted as simplification in code).
 // Valid only when net_configured != 0. Octets in network order.
