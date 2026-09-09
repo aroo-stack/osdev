@@ -31,6 +31,12 @@ int udp_rx_len(void);
 uint8_t *udp_rx_src_ip(void);
 uint16_t udp_rx_src_port(void);
 void udp_rx_consume(void);
+// Phase 8: TCP handshake ONLY (minimal PoC: IDLE/SYN_SENT/ESTABLISHED, no
+// retransmit/data/close, one connection). tcp_handshake() sends SYN;
+// tcp_input() (called from RX path) validates SYN-ACK + sends final ACK.
+void tcp_handshake(uint8_t *dip, uint16_t dport, uint16_t sport, uint32_t iss);
+void tcp_input(uint8_t *f, int framelen);
+int tcp_established(void);
 // Phase 6: ARP cache + request/reply. Table holds a few IP->MAC mappings
 // (same simple-global-state pattern as net_* config). Table lookup for TX
 // path use; store on valid replies/requests (RFC 826 merge rule).

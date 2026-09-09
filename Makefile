@@ -94,7 +94,7 @@ os.iso: kernel.bin
 	grub-mkrescue -o os.iso isodir
 
 run:
-	qemu-system-i386 -cdrom os.iso -serial stdio -m 128
+	qemu-system-i386 -cdrom os.iso -serial stdio -m 128 -device rtl8139,netdev=n0 -netdev user,id=n0
 
 run-headless:
 	qemu-system-i386 -cdrom os.iso -serial stdio -display none -vga std -monitor none -m 128

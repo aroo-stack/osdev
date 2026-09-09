@@ -48,6 +48,7 @@ static inline uint32_t rtl_inl(uint16_t port){ uint32_t r; __asm__ volatile("inl
 static void s_putc(char c){ while(!(rtl_inb(0x3F8+5)&0x20)); rtl_outb(0x3F8,(uint8_t)c); }
 static void s_puts(const char*s){ for(int i=0;s[i];i++) s_putc(s[i]); }
 static void s_put_hex16(uint16_t n){ s_puts("0x"); for(int i=12;i>=0;i-=4){ uint8_t v=(n>>i)&0xF; s_putc(v<10?'0'+v:'A'+v-10); } }
+static void s_put_hex8(uint8_t n){ s_putc(n>>4<10?'0'+(n>>4):'A'+(n>>4)-10); s_putc((n&0xF)<10?'0'+(n&0xF):'A'+(n&0xF)-10); }
 static void s_put_hex32(uint32_t n){ s_puts("0x"); for(int i=28;i>=0;i-=4){ uint8_t v=(n>>i)&0xF; s_putc(v<10?'0'+v:'A'+v-10); } }
 static void s_put_dec(uint32_t n){ char b[11]; int i=0; if(n==0){s_putc('0');return;} while(n){b[i++]='0'+n%10; n/=10;} while(i--) s_putc(b[i]); }
 
@@ -326,6 +327,9 @@ static void rtl8139_drain_rx(void){
                 }
             }
         }
+        // Phase 8: TCP input (proto 6). tcp_input strict-matches our attempt.
+        if(framelen >= 14+20+20 && f[12]==0x08 && f[13]==0x00 && f[23]==6)
+            tcp_input(f, framelen);
         int next = (off + 4 + rawlen + 3) & ~3;
         next %= RTL_RX_RING;
         int capr = (next + RTL_RX_RING - 16) % RTL_RX_RING;
@@ -773,4 +777,163 @@ int udp_send(uint8_t *dip, uint16_t dport, uint16_t sport, uint8_t *data, int le
     s_puts(" ports "); s_put_dec(sport); s_putc(':'); s_put_dec(dport);
     s_puts(" payload "); s_put_dec((uint32_t)len); s_puts("B frame "); s_put_dec((uint32_t)framelen); s_puts("B\n");
     return rtl8139_tx_raw(frame, framelen);
+}
+
+// Phase 8: TCP three-way handshake ONLY (minimal proof-of-concept, explicitly
+// NOT a full stack: no state machine beyond IDLE/SYN_SENT/ESTABLISHED, no
+// retransmission timers, no data transfer, no teardown, one connection).
+// Header per RFC 793 (verified via excerpts): sport(2) dport(2) seq(4)
+// ack(4) data-offset-nibble(4b)+reserved+flags(12b: ...ACK 0x10 ... SYN 0x02)
+// window(2) checksum(2) urgent(2). We send 20B optionless headers (offset 5).
+// Checksum: same 96-bit pseudo-header concept as UDP (src, dst, zero,
+// protocol=6, TCP length) over header+data, checksum field zeroed while
+// computing. Sequence rules: SYN consumes one number (ack = iss+1).
+#define TCP_FLAG_SYN 0x02
+#define TCP_FLAG_ACK 0x10
+#define TCP_FLAG_RST 0x04
+#define TCP_WND 8192
+static int tcp_state = 0; // 0 IDLE, 1 SYN_SENT, 2 ESTABLISHED
+static uint8_t tcp_dip[4] = {0,0,0,0};
+static uint16_t tcp_dport = 0, tcp_sport = 0;
+static uint32_t tcp_iss = 0, tcp_theirs = 0;
+int tcp_established(void){ return tcp_state == 2; }
+
+static uint16_t tcp_checksum(uint8_t *sip, uint8_t *dip, uint8_t *t, int tlen){
+    // tlen = TCP header + data; t[16..17] (checksum) must be zero on entry.
+    uint32_t sum = 0;
+    for(int i=0;i<4;i+=2){ sum += ((uint16_t)sip[i] << 8) | sip[i+1]; sum += ((uint16_t)dip[i] << 8) | dip[i+1]; }
+    sum += 6; // zero byte + protocol (0x00, 0x06)
+    sum += (uint16_t)tlen;
+    for(int i=0;i+1<tlen;i+=2){
+        if(i==16) continue; // skip checksum field itself
+        sum += ((uint16_t)t[i] << 8) | t[i+1];
+    }
+    if(tlen & 1) sum += (uint16_t)t[tlen-1] << 8; // odd: virtual pad
+    while(sum >> 16) sum = (sum & 0xFFFF) + (sum >> 16);
+    return (uint16_t)~sum;
+}
+
+// Build eth/IP/TCP segment (20B header, no options/data) into frame[].
+// Returns total frame length sans pad (54). Caller pads + transmits.
+static int tcp_build_segment(uint8_t *frame, uint8_t *dmac,
+                             uint16_t sport, uint16_t dport,
+                             uint32_t seq, uint32_t ack, uint8_t flags){
+    uint8_t mymac[6]; read_our_mac(mymac);
+    for(int i=0;i<6;i++){ frame[i] = dmac[i]; frame[6+i] = mymac[i]; }
+    frame[12] = 0x08; frame[13] = 0x00;
+    uint8_t *ip = &frame[14];
+    for(int i=0;i<20;i++) ip[i] = 0;
+    ip[0] = 0x45; ip[2] = 0; ip[3] = 40; // total 20+20
+    udp_ip_id++; ip[4] = (uint8_t)(udp_ip_id >> 8); ip[5] = (uint8_t)udp_ip_id;
+    ip[8] = 64; ip[9] = 6; // TTL, TCP
+    for(int i=0;i<4;i++){ ip[12+i] = net_our_ip[i]; ip[16+i] = tcp_dip[i]; }
+    { uint16_t c = ip_checksum(ip, 20); ip[10] = (uint8_t)(c >> 8); ip[11] = (uint8_t)c; }
+    uint8_t *t = &frame[34];
+    for(int i=0;i<20;i++) t[i] = 0;
+    t[0]=(uint8_t)(sport>>8); t[1]=(uint8_t)sport;
+    t[2]=(uint8_t)(dport>>8); t[3]=(uint8_t)dport;
+    t[4]=(uint8_t)(seq>>24); t[5]=(uint8_t)(seq>>16); t[6]=(uint8_t)(seq>>8); t[7]=(uint8_t)seq;
+    t[8]=(uint8_t)(ack>>24); t[9]=(uint8_t)(ack>>16); t[10]=(uint8_t)(ack>>8); t[11]=(uint8_t)ack;
+    t[12]=0x50; t[13]=flags; // data offset 5, flags
+    t[14]=(uint8_t)(TCP_WND>>8); t[15]=(uint8_t)TCP_WND;
+    // t[16..17] checksum stays 0 while computing; t[18..19] urgent = 0.
+    { uint16_t c = tcp_checksum(net_our_ip, tcp_dip, t, 20);
+      t[16]=(uint8_t)(c>>8); t[17]=(uint8_t)c; }
+    return 54;
+}
+
+void tcp_handshake(uint8_t *dip, uint16_t dport, uint16_t sport, uint32_t iss){
+    if(!initialized || !io_base || !net_configured){
+        s_puts("TCP: handshake skipped (not ready)\n"); return;
+    }
+    for(int i=0;i<4;i++) tcp_dip[i] = dip[i];
+    tcp_dport = dport; tcp_sport = sport; tcp_iss = iss; tcp_theirs = 0;
+    uint8_t dmac[6];
+    if(!udp_resolve_mac(dip, dmac)){ s_puts("TCP: no route (MAC unresolvable)\n"); return; }
+    static uint8_t seg[128];
+    int len = tcp_build_segment(seg, dmac, sport, dport, iss, 0, TCP_FLAG_SYN);
+    while(len < 60){ seg[len] = 0; len++; }
+    { uint16_t sc = (uint16_t)(((uint16_t)seg[50] << 8) | seg[51]); // TCP cksum at seg[34+16]
+      s_puts("TCP: TX SYN: us->"); s_put_ip(tcp_dip);
+      s_putc(':'); s_put_dec((uint32_t)dport);
+      s_puts(", seq="); s_put_hex32(iss);
+      s_puts(", ack=0, cksum="); s_put_hex16(sc); s_puts("\n"); }
+    tcp_state = 1; // SYN_SENT (set before TX so an instant reply can't miss)
+    rtl8139_tx_raw(seg, len);
+}
+
+// Incoming TCP for OUR attempt only (strict 4-tuple match). Validates SYN-ACK
+// (flags SYN+ACK, ack == iss+1), records their ISN, sends final ACK
+// (seq = iss+1, ack = theirs+1), marks ESTABLISHED. RST aborts to IDLE.
+void tcp_input(uint8_t *f, int framelen){
+    if(tcp_state != 1) return; // only expecting SYN-ACK while SYN_SENT
+    int ihl = f[14] & 0x0F;
+    if(ihl < 5) return;
+    int to = 14 + ihl*4;
+    if(framelen < to + 20) return; // need full 20B TCP header
+    // 4-tuple: their ip/port -> our port.
+    for(int i=0;i<4;i++) if(f[26+i] != tcp_dip[i]) return;
+    if(f[to]!= (uint8_t)(tcp_dport>>8) || f[to+1] != (uint8_t)tcp_dport) return;
+    if(f[to+2]!= (uint8_t)(tcp_sport>>8) || f[to+3] != (uint8_t)tcp_sport) return;
+    uint8_t b12 = f[to+12];
+    uint8_t flags = f[to+13];
+    int off = b12 >> 4; // data offset: TCP header length in 32-bit words
+    uint32_t seq = ((uint32_t)f[to+4]<<24)|((uint32_t)f[to+5]<<16)|((uint32_t)f[to+6]<<8)|f[to+7];
+    uint32_t ack = ((uint32_t)f[to+8]<<24)|((uint32_t)f[to+9]<<16)|((uint32_t)f[to+10]<<8)|f[to+11];
+    uint16_t ip_total = (uint16_t)(((uint16_t)f[16] << 8) | f[17]);
+    int tcp_len = (int)ip_total - ihl*4; // full TCP segment: header + options + data
+    if(off < 5){ s_puts("TCP: RX bad data-offset "); s_put_dec((uint32_t)off); s_puts(", ignoring\n"); return; }
+    if(tcp_len < off*4 || framelen < to + tcp_len){
+        s_puts("TCP: RX truncated (ip_total "); s_put_dec((uint32_t)ip_total);
+        s_puts(" ihl "); s_put_dec((uint32_t)ihl); s_puts("), ignoring\n"); return;
+    }
+    if(b12 & 0x0E){ s_puts("TCP: RX reserved bits set (b12="); s_put_hex8(b12); s_puts("), ignoring\n"); return; }
+    if(b12 & 0x01) s_puts("TCP: RX NS set (logged, not rejected)\n");
+    if(flags & TCP_FLAG_RST){ s_puts("TCP: RST (off="); s_put_dec((uint32_t)off); s_puts("), aborting to IDLE\n"); tcp_state = 0; return; }
+    // Checksum BEFORE accept: recompute over the whole segment (tcp_len bytes,
+    // header + options + data) with the pseudo-header; checksum field excluded
+    // the same way as on TX. Mismatch => drop, no state change.
+    {
+        uint16_t rx_ck = (uint16_t)(((uint16_t)f[to+16] << 8) | f[to+17]);
+        uint16_t calc = tcp_checksum(&f[26], &f[30], &f[to], tcp_len);
+        if(calc != rx_ck){
+            s_puts("TCP: RX seq="); s_put_hex32(seq);
+            s_puts(" ack="); s_put_hex32(ack);
+            s_puts(" BAD_CKSUM (got "); s_put_hex16(rx_ck);
+            s_puts(" want "); s_put_hex16(calc); s_puts("), dropping\n");
+            return;
+        }
+    }
+    if((flags & (TCP_FLAG_SYN|TCP_FLAG_ACK)) != (TCP_FLAG_SYN|TCP_FLAG_ACK)){
+        s_puts("TCP: not SYN-ACK (flags="); s_put_hex8(flags); s_puts("), ignoring\n"); return;
+    }
+    if(ack != tcp_iss + 1){
+        s_puts("TCP: ack mismatch (want iss+1), ignoring\n"); return;
+    }
+    s_puts("TCP: RX SYN-ACK: "); s_put_ip(tcp_dip);
+    s_putc(':'); s_put_dec((uint32_t)tcp_dport);
+    s_puts("->us, seq="); s_put_hex32(seq);
+    s_puts(" ack="); s_put_hex32(ack);
+    s_puts(" flags=SA("); s_put_hex8(flags); s_puts(")");
+    s_puts(" off="); s_put_dec((uint32_t)off);
+    s_puts(" cksum ok\n");
+    tcp_theirs = seq;
+    // NOTE: no second log line here on purpose. The RX SYN-ACK line above
+    // already carries seq (= their ISN); a follow-up line previously got
+    // garbled by a task preempting us mid-print on the shared serial port
+    // (serial logging stays outside cli by project convention, task.c).
+    // Final ACK: seq = iss+1 (SYN consumed one), ack = theirs+1.
+    uint8_t dmac[6];
+    if(!udp_resolve_mac(tcp_dip, dmac)){ s_puts("TCP: route lost, abort\n"); tcp_state = 0; return; }
+    static uint8_t ackseg[128];
+    int len = tcp_build_segment(ackseg, dmac, tcp_sport, tcp_dport,
+                                tcp_iss + 1, tcp_theirs + 1, TCP_FLAG_ACK);
+    while(len < 60){ ackseg[len] = 0; len++; }
+    tcp_state = 2; // ESTABLISHED (set before TX, same reason as SYN_SENT)
+    { uint16_t ac = (uint16_t)(((uint16_t)ackseg[50] << 8) | ackseg[51]); // cksum at ackseg[34+16]
+      s_puts("TCP: TX ACK: seq="); s_put_hex32(tcp_iss+1);
+      s_puts(" ack="); s_put_hex32(tcp_theirs+1);
+      s_puts(" cksum="); s_put_hex16(ac); s_puts("\n"); }
+    rtl8139_tx_raw(ackseg, len);
+    s_puts("TCP: ESTABLISHED (minimal PoC: no retransmit, no data, no close)\n");
 }

@@ -533,6 +533,34 @@ void kernel_main(uint32_t magic, uint32_t mbi_addr) {
         serial_puts("\n");
         udp_rx_consume();
     }
+    // RTL8139 Phase 8: TCP handshake ONLY (SYN/SYN-ACK/ACK, no data/close).
+    // Primary target: 93.184.216.34:80 (example.com, well-known to accept
+    // TCP). Fallback: DNS server IP on TCP/53 (10.0.2.3, SLIRP forwarder -
+    // may not speak TCP, so a timeout there is an honest result too).
+    // Off-subnet frames route via the gateway MAC (udp_resolve_mac
+    // fallback, same as Phase 7). Outcome logged honestly below.
+    {
+        static uint8_t tcp_primary[4] = {93, 184, 216, 34};
+        static uint8_t tcp_fb[4] = {10, 0, 2, 3};
+        serial_puts("TCP: using target 93.184.216.34:80\n");
+        tcp_handshake(tcp_primary, 80, 40001, 0x10000000u);
+        // Time-based wait: pit ticks run here (post-sti, PIT 100Hz, scheduler
+        // live), so a 10s deadline honestly covers a real round-trip. The old
+        // fixed 3M-spin wait expired in far less wall-time under TCG and
+        // printed the verdict before a live SYN-ACK arrived (seen last run).
+        { int t0 = pit_get_ticks();
+          while(!tcp_established() && (pit_get_ticks() - t0) < 1000){ rtl8139_pump_rx(); } }
+        if(!tcp_established()){
+            serial_puts("TCP: primary timeout (10s, no SYN-ACK), trying fallback 10.0.2.3:53\n");
+            serial_puts("TCP: using target 10.0.2.3:53\n");
+            tcp_handshake(tcp_fb, 53, 40002, 0x20000000u);
+            { int t0 = pit_get_ticks();
+              while(!tcp_established() && (pit_get_ticks() - t0) < 1000){ rtl8139_pump_rx(); } }
+        }
+        serial_puts("TCP: STATE: ");
+        serial_puts(tcp_established()?"ESTABLISHED (SYN/SYN-ACK/ACK complete)":"NOT established (timeout - see RX log above)");
+        serial_puts("\n");
+    }
     int gui_tick = 0;
     int taskman_tick = 0;
     int last_clk_sec = -1; // taskbar clock 1Hz gate (elapsed seconds last drawn)
