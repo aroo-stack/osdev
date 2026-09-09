@@ -17,6 +17,20 @@ void rtl8139_send_test(void);
 // Phase 4 trigger: DHCP discover broadcast (elicits DHCPOFFER from QEMU
 // user-net). Uses TX descriptor pair 1 (pair 0 consumed by send_test).
 void rtl8139_send_dhcp_discover(void);
+// Phase 7: generic UDP. udp_send resolves MAC via ARP cache (ARP request +
+// bounded wait on miss, gateway-MAC fallback), builds eth/IP/UDP with correct
+// checksums, transmits. Returns 1 on TOK, 0 on failure.
+// udp_listen(port): arm single-port listener (0 = off). Incoming matching
+// payloads land in udp_rx_* (most recent only, no queue); udp_received() to
+// check, udp_rx_consume() to clear.
+int udp_send(uint8_t *dip, uint16_t dport, uint16_t sport, uint8_t *data, int len);
+void udp_listen(uint16_t port);
+int udp_received(void);
+uint8_t *udp_rx_data(void);
+int udp_rx_len(void);
+uint8_t *udp_rx_src_ip(void);
+uint16_t udp_rx_src_port(void);
+void udp_rx_consume(void);
 // Phase 6: ARP cache + request/reply. Table holds a few IP->MAC mappings
 // (same simple-global-state pattern as net_* config). Table lookup for TX
 // path use; store on valid replies/requests (RFC 826 merge rule).

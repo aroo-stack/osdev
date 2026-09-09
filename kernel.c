@@ -44,13 +44,18 @@ static int serial_transmit_empty(void) {
     return inb(0x3F8 + 5) & 0x20;
 }
 
-static void serial_putc(char c) {
-    while (!serial_transmit_empty());
+static void serial_putc(char c) {    while (!serial_transmit_empty());
     outb(0x3F8, c);
 }
 
 static void serial_puts(const char* s) {
     for (size_t i = 0; s[i] != '\0'; i++) serial_putc(s[i]);
+}
+static void serial_put_dec(uint32_t n) {
+    char b[11]; int i = 0;
+    if(n == 0){ serial_putc('0'); return; }
+    while(n){ b[i++] = '0' + n % 10; n /= 10; }
+    while(i--) serial_putc(b[i]);
 }
 
 static void vga_puts(const char* s) {
@@ -406,6 +411,61 @@ void kernel_main(uint32_t magic, uint32_t mbi_addr) {
         }
     }
 
+    // RTL8139 Phase 7: generic UDP round trip via real DNS (10.0.2.3:53).
+    // Why DNS, not loopback-or-dead-end: loopback to self needs ARP-for-self
+    // hacks and QEMU won't reflect our own frames back anyway; a dead-end IP
+    // only proves TX. A DNS query gets a REAL reply from SLIRP's forwarder,
+    // proving generic send + receive + checksums both directions (a correct
+    // reply means our UDP checksum passed, and our RX path parsed theirs).
+    // L2 uses the cached gateway MAC (same subnet, next-hop style).
+    {
+        extern uint8_t net_gw[4];
+        static uint8_t dns_ip[4] = {10, 0, 2, 3};
+        // "example.com" A query, ID 0x1234, RD=1: 12 header + 13 QNAME + 4.
+        static uint8_t dns_q[29];
+        dns_q[0]=0x12; dns_q[1]=0x34; dns_q[2]=0x01; dns_q[3]=0x00;
+        dns_q[4]=0x00; dns_q[5]=0x01; dns_q[6]=0x00; dns_q[7]=0x00;
+        dns_q[8]=0x00; dns_q[9]=0x00; dns_q[10]=0x00; dns_q[11]=0x00;
+        dns_q[12]=7; dns_q[13]='e'; dns_q[14]='x'; dns_q[15]='a'; dns_q[16]='m';
+        dns_q[17]='p'; dns_q[18]='l'; dns_q[19]='e'; dns_q[20]=3;
+        dns_q[21]='c'; dns_q[22]='o'; dns_q[23]='m'; dns_q[24]=0;
+        dns_q[25]=0x00; dns_q[26]=0x01; dns_q[27]=0x00; dns_q[28]=0x01;
+        serial_puts("UDP: query hex:\n  ");
+        for(int i=0;i<29;i++){
+            uint8_t b = dns_q[i];
+            serial_putc(b>>4<10?'0'+(b>>4):'A'+(b>>4)-10);
+            serial_putc((b&0xF)<10?'0'+(b&0xF):'A'+(b&0xF)-10);
+            serial_putc(' ');
+        }
+        serial_puts("\n");
+        udp_listen(40000);
+        if(udp_send(dns_ip, 53, 40000, dns_q, 29)){
+            int spins = 0;
+            while(!udp_received() && spins < 2000000){ rtl8139_pump_rx(); spins++; }
+            if(udp_received()){
+                uint8_t *r = udp_rx_data();
+                int rl = udp_rx_len();
+                uint16_t rid = rl >= 2 ? (uint16_t)(((uint16_t)r[0] << 8) | r[1]) : 0;
+                int an = rl >= 8 ? (((int)r[6] << 8) | r[7]) : -1;
+                serial_puts("UDP: reply len "); serial_put_dec((uint32_t)rl);
+                serial_puts(" ID 0x");
+                { uint8_t b1=(uint8_t)(rid>>8), b0=(uint8_t)rid;
+                  serial_putc(b1>>4<10?'0'+(b1>>4):'A'+(b1>>4)-10);
+                  serial_putc((b1&0xF)<10?'0'+(b1&0xF):'A'+(b1&0xF)-10);
+                  serial_putc(b0>>4<10?'0'+(b0>>4):'A'+(b0>>4)-10);
+                  serial_putc((b0&0xF)<10?'0'+(b0&0xF):'A'+(b0&0xF)-10); }
+                serial_puts(rid==0x1234?" MATCH":" MISMATCH");
+                serial_puts(" ANCOUNT "); serial_put_dec((uint32_t)(an<0?999:an));
+                serial_puts(an>=1?" (has answers)":" (NO answers)");
+                serial_puts(" from ");
+                { uint8_t *sip = udp_rx_src_ip();
+                  for(int i=0;i<4;i++){ serial_put_dec(sip[i]); if(i<3) serial_putc('.'); } }
+                serial_putc(':'); serial_put_dec(udp_rx_src_port()); serial_puts("\n");
+                udp_rx_consume();
+            } else serial_puts("UDP: no reply (timeout; TX proven, DNS unreachable?)\n");
+        } else serial_puts("UDP: send failed\n");
+    }
+
     // Phase 15: PIT scheduler - must be after IDT/PIC and after tasks' stacks are mapped
     serial_puts("PIT: init 100Hz (divisor 11931 -> 0x2E9B, cmd 0x36 mode 3)\n");
     pit_init(100);
@@ -458,6 +518,21 @@ void kernel_main(uint32_t magic, uint32_t mbi_addr) {
 
 
     // Main loop - GUI task 0
+    // Late UDP check: a slow DNS reply (host resolver can take seconds) may
+    // arrive after the bounded boot wait above gave up. If it did, verify it
+    // here (ID match + answers) - the drain already stored it via udp_listen.
+    if(udp_received()){
+        uint8_t *r = udp_rx_data();
+        int rl = udp_rx_len();
+        uint16_t rid = rl >= 2 ? (uint16_t)(((uint16_t)r[0] << 8) | r[1]) : 0;
+        int an = rl >= 8 ? (((int)r[6] << 8) | r[7]) : -1;
+        serial_puts("UDP: late reply len "); serial_put_dec((uint32_t)rl);
+        serial_puts(" ID match "); serial_puts(rid==0x1234?"YES":"NO");
+        serial_puts(" ANCOUNT "); serial_put_dec((uint32_t)(an<0?999:an));
+        serial_puts(an>=1?" (answers OK)":" (none)");
+        serial_puts("\n");
+        udp_rx_consume();
+    }
     int gui_tick = 0;
     int taskman_tick = 0;
     int last_clk_sec = -1; // taskbar clock 1Hz gate (elapsed seconds last drawn)

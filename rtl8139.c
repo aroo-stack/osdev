@@ -145,6 +145,14 @@ void rtl8139_init(void){
 }
 
 static int rx_offset = 0; // driver read pointer, always < 8192 (mod ring)
+// UDP listener state (single port, most-recent packet only). Declared here,
+// before the drain hook that reads/writes them directly.
+static uint16_t udp_listen_port = 0;
+static uint8_t udp_rx_buf[512];
+static int udp_rx_n = 0;
+static uint8_t udp_rx_src[4] = {0,0,0,0};
+static uint16_t udp_rx_sport = 0;
+static int udp_rx_ready = 0;
 // Deferred drain: the IRQ only acks + arms; the main loop parses. Keeps IRQ
 // short per project discipline (serial logging ~200 bytes would otherwise
 // stall other IRQs ~20ms). Single-writer flag (IRQ sets, main loop clears):
@@ -289,6 +297,35 @@ static void rtl8139_drain_rx(void){
         if(framelen >= 290 && f[12]==0x08 && f[13]==0x00 && f[23]==17 &&
            f[34]==0 && f[35]==67 && f[36]==0 && f[37]==68)
             parse_dhcp_offer(f, framelen);
+        // Phase 7: generic UDP listener. IPv4 (IHL-respecting) + proto 17 +
+        // sane UDP length + dport match (0 = off). Stores most recent only.
+        // Independent of the DHCP path above (different ports, same frame ok).
+        {
+            int ihl = f[14] & 0x0F;
+            if(ihl >= 5){
+                int uo = 14 + ihl*4;
+                if(udp_listen_port != 0 && framelen >= uo + 8 &&
+                   f[14+9]==17){
+                    int dport = ((int)f[uo+2] << 8) | f[uo+3];
+                    int ulen = ((int)f[uo+4] << 8) | f[uo+5];
+                    if(dport == udp_listen_port && ulen >= 8 &&
+                       framelen >= uo + ulen){
+                        int paylen = ulen - 8;
+                        if(paylen > 512) paylen = 512; // truncate, don't overflow
+                        for(int i=0;i<paylen;i++) udp_rx_buf[i] = f[uo+8+i];
+                        udp_rx_n = paylen;
+                        int ipo = 14;
+                        for(int i=0;i<4;i++) udp_rx_src[i] = f[ipo+12+i];
+                        udp_rx_sport = (uint16_t)(((uint16_t)f[uo] << 8) | f[uo+1]);
+                        udp_rx_ready = 1;
+                        s_puts("UDP: recv "); s_put_dec((uint32_t)paylen);
+                        s_puts("B on port "); s_put_dec(udp_listen_port);
+                        s_puts(" from "); s_put_ip(udp_rx_src);
+                        s_putc(':'); s_put_dec(udp_rx_sport); s_puts("\n");
+                    }
+                }
+            }
+        }
         int next = (off + 4 + rawlen + 3) & ~3;
         next %= RTL_RX_RING;
         int capr = (next + RTL_RX_RING - 16) % RTL_RX_RING;
@@ -340,7 +377,7 @@ void rtl8139_poll_rx(void){
 #define RTL_REG_TSD0  0x10
 #define RTL_TSD_TOK 0x8000u
 #define RTL_TX_FRAME_LEN 60
-static uint8_t tx_buffer[512] __attribute__((aligned(16))); // .bss: phys == virt
+static uint8_t tx_buffer[1024] __attribute__((aligned(16))); // .bss: phys == virt
 
 void rtl8139_send_test(void){
     if(!initialized || !io_base){
@@ -637,4 +674,103 @@ void rtl8139_pump_rx(void){
     if(!(isr & 0x01)) return; // no receive pending
     rtl_outw((uint16_t)(io_base + RTL_REG_ISR), isr); // ack first (QEMU rule)
     rtl8139_drain_rx();
+}
+
+// Phase 7: generic UDP send/receive (not DHCP/ARP-specific).
+// Checksums per RFC 768/791: 16-bit one's-complement sum (big-endian words),
+// fold carries, complement. UDP covers pseudo-header (src+dst IP, zero,
+// protocol 17, UDP length) + header (checksum field zeroed) + payload, with a
+// virtual zero pad byte if the payload length is odd (pad NOT transmitted).
+static uint16_t ones_sum_finish(uint32_t sum){
+    while(sum >> 16) sum = (sum & 0xFFFF) + (sum >> 16);
+    return (uint16_t)~sum;
+}
+static uint16_t ip_checksum(uint8_t *h, int hlen){
+    uint32_t sum = 0;
+    for(int i=0;i+1<hlen;i+=2) sum += ((uint16_t)h[i] << 8) | h[i+1];
+    if(hlen & 1) sum += (uint16_t)h[hlen-1] << 8; // odd: pad low byte (never for 20B IP, kept general)
+    return ones_sum_finish(sum);
+}
+static uint16_t udp_checksum(uint8_t *sip, uint8_t *dip, uint8_t *u, int ulen){
+    // ulen = UDP header (8) + payload; checksum field u[6..7] must be zero in.
+    uint32_t sum = 0;
+    for(int i=0;i<4;i+=2){ sum += ((uint16_t)sip[i] << 8) | sip[i+1]; sum += ((uint16_t)dip[i] << 8) | dip[i+1]; }
+    sum += 17; // zero byte + protocol (0x00, 0x11)
+    sum += (uint16_t)ulen;
+    for(int i=0;i+1<ulen;i+=2){
+        if(i==6) continue; // skip checksum field itself
+        sum += ((uint16_t)u[i] << 8) | u[i+1];
+    }
+    if(ulen & 1) sum += (uint16_t)u[ulen-1] << 8; // odd payload: virtual pad
+    // NOTE: if ulen is odd, byte ulen-1 is payload; the (i==6) skip only
+    // matters for even ulen>=8 (always true here: header is 8 bytes).
+    return ones_sum_finish(sum);
+}
+void udp_rx_consume(void){ udp_rx_ready = 0; }
+void udp_listen(uint16_t port){ udp_listen_port = port; udp_rx_ready = 0; }
+int udp_received(void){ return udp_rx_ready; }
+uint8_t *udp_rx_data(void){ return udp_rx_buf; }
+int udp_rx_len(void){ return udp_rx_n; }
+uint8_t *udp_rx_src_ip(void){ return udp_rx_src; }
+uint16_t udp_rx_src_port(void){ return udp_rx_sport; }
+
+// Resolve L2 destination: our own IP -> our MAC (loopback-by-construction);
+// ARP cache hit -> cached MAC; else ARP-request + bounded pump-wait; final
+// fallback: gateway MAC (covers SLIRP addresses that won't answer ARP).
+// Returns 1 with dmac filled, 0 on total failure.
+static int udp_resolve_mac(uint8_t *dip, uint8_t *dmac){
+    uint8_t mymac[6]; read_our_mac(mymac);
+    if(dip[0]==net_our_ip[0] && dip[1]==net_our_ip[1] &&
+       dip[2]==net_our_ip[2] && dip[3]==net_our_ip[3]){
+        for(int i=0;i<6;i++) dmac[i] = mymac[i];
+        s_puts("UDP: dest is self, using our MAC\n");
+        return 1;
+    }
+    if(arp_lookup(dip, dmac)){ s_puts("UDP: ARP cache hit\n"); return 1; }
+    s_puts("UDP: ARP cache miss, requesting...\n");
+    rtl8139_send_arp_request(dip);
+    for(int i=0;i<2000000 && !arp_lookup(dip, dmac);i++) rtl8139_pump_rx();
+    if(arp_lookup(dip, dmac)){ s_puts("UDP: ARP resolved via request\n"); return 1; }
+    s_puts("UDP: ARP unanswered, falling back to gateway MAC\n");
+    if(arp_lookup(net_gw, dmac)) return 1;
+    s_puts("UDP: no gateway MAC either, FAIL\n");
+    return 0;
+}
+static uint16_t udp_ip_id = 0x2000;
+
+int udp_send(uint8_t *dip, uint16_t dport, uint16_t sport, uint8_t *data, int len){
+    if(!initialized || !io_base || !net_configured){
+        s_puts("UDP: send skipped (not ready)\n"); return 0;
+    }
+    if(len < 0 || len > 400){ s_puts("UDP: bad length\n"); return 0; }
+    uint8_t dmac[6];
+    if(!udp_resolve_mac(dip, dmac)) return 0;
+    uint8_t mymac[6]; read_our_mac(mymac);
+    static uint8_t frame[1024];
+    for(int i=0;i<6;i++){ frame[i] = dmac[i]; frame[6+i] = mymac[i]; }
+    frame[12] = 0x08; frame[13] = 0x00;
+    uint8_t *ip = &frame[14];
+    int ip_total = 20 + 8 + len;
+    for(int i=0;i<20;i++) ip[i] = 0;
+    ip[0] = 0x45; ip[2] = (uint8_t)(ip_total >> 8); ip[3] = (uint8_t)ip_total;
+    udp_ip_id++; ip[4] = (uint8_t)(udp_ip_id >> 8); ip[5] = (uint8_t)udp_ip_id;
+    ip[8] = 64; ip[9] = 17;
+    for(int i=0;i<4;i++){ ip[12+i] = net_our_ip[i]; ip[16+i] = dip[i]; }
+    { uint16_t c = ip_checksum(ip, 20); ip[10] = (uint8_t)(c >> 8); ip[11] = (uint8_t)c; }
+    uint8_t *u = &frame[34];
+    int ulen = 8 + len;
+    u[0]=(uint8_t)(sport>>8); u[1]=(uint8_t)sport;
+    u[2]=(uint8_t)(dport>>8); u[3]=(uint8_t)dport;
+    u[4]=(uint8_t)(ulen>>8); u[5]=(uint8_t)ulen;
+    u[6]=0; u[7]=0;
+    for(int i=0;i<len;i++) u[8+i] = data[i];
+    { uint16_t c = udp_checksum(net_our_ip, dip, u, ulen);
+      u[6]=(uint8_t)(c>>8); u[7]=(uint8_t)c; }
+    int framelen = 14 + ip_total;
+    while(framelen < 60){ frame[framelen] = 0; framelen++; } // 60B minimum
+    s_puts("UDP: TX "); s_put_ip(net_our_ip);
+    s_puts(" -> "); s_put_ip(dip);
+    s_puts(" ports "); s_put_dec(sport); s_putc(':'); s_put_dec(dport);
+    s_puts(" payload "); s_put_dec((uint32_t)len); s_puts("B frame "); s_put_dec((uint32_t)framelen); s_puts("B\n");
+    return rtl8139_tx_raw(frame, framelen);
 }
