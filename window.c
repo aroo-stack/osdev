@@ -1868,6 +1868,18 @@ void dirty_add(int x, int y, int w, int h){
     if(x0 >= x1 || y0 >= y1) return; // fully off-screen: nothing
     if(!dirty_valid){ dirty_x0=x0; dirty_y0=y0; dirty_x1=x1; dirty_y1=y1; dirty_valid=1; }
     else { if(x0<dirty_x0)dirty_x0=x0; if(y0<dirty_y0)dirty_y0=y0; if(x1>dirty_x1)dirty_x1=x1; if(y1>dirty_y1)dirty_y1=y1; }
+    // Tripwire for oversized unions (permanent diagnostic): legit per-op rects
+    // are small (16x16 cursor, window bounds, clock strip); a huge union means
+    // many ops accumulated without an intervening redraw (IRQ flood outrunning
+    // the main loop). Logs input + result so growth-vs-jump is distinguishable.
+    // Threshold 1000x700: above any single window-op rect, below fullscreen.
+    if(dirty_x1-dirty_x0 > 1000 || dirty_y1-dirty_y0 > 700){
+        s_puts("DIRTYBIG in "); s_put_dec((uint32_t)(x1-x0)); s_putc('x'); s_put_dec((uint32_t)(y1-y0));
+        s_puts(" at "); s_put_dec((uint32_t)x0); s_putc(','); s_put_dec((uint32_t)y0);
+        s_puts(" -> union "); s_put_dec((uint32_t)(dirty_x1-dirty_x0)); s_putc('x'); s_put_dec((uint32_t)(dirty_y1-dirty_y0));
+        s_puts(" at "); s_put_dec((uint32_t)dirty_x0); s_putc(','); s_put_dec((uint32_t)dirty_y0);
+        s_puts("\n");
+    }
     g_needs_redraw = 1;
 }
 void dirty_all(void){
