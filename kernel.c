@@ -533,29 +533,71 @@ void kernel_main(uint32_t magic, uint32_t mbi_addr) {
         serial_puts("\n");
         udp_rx_consume();
     }
-    // RTL8139 Phase 8: TCP handshake ONLY (SYN/SYN-ACK/ACK, no data/close).
-    // Primary target: 93.184.216.34:80 (example.com, well-known to accept
-    // TCP). Fallback: DNS server IP on TCP/53 (10.0.2.3, SLIRP forwarder -
-    // may not speak TCP, so a timeout there is an honest result too).
-    // Off-subnet frames route via the gateway MAC (udp_resolve_mac
-    // fallback, same as Phase 7). Outcome logged honestly below.
+    // RTL8139 Phase 9: TCP data transfer. Primary: 10.0.2.2:8080 (host
+    // listener started BEFORE QEMU; deterministic both-sides evidence).
+    // Fallback ONLY on RST/timeout: DNS-over-TCP to 10.0.2.3:53 with 2-byte
+    // BE length prefix + exact 29B Phase 7 query (never plain HTTP to :53).
+    // example.com:80 removed (host curl timeout = unreachable, not OS bug).
     {
-        static uint8_t tcp_primary[4] = {93, 184, 216, 34};
+        static uint8_t tcp_primary[4] = {10, 0, 2, 2};
         static uint8_t tcp_fb[4] = {10, 0, 2, 3};
-        serial_puts("TCP: using target 93.184.216.34:80\n");
-        tcp_handshake(tcp_primary, 80, 40001, 0x10000000u);
+        serial_puts("TCP: using target 10.0.2.2:8080\n");
+        tcp_handshake(tcp_primary, 8080, 40001, 0x30000000u);
         // Time-based wait: pit ticks run here (post-sti, PIT 100Hz, scheduler
         // live), so a 10s deadline honestly covers a real round-trip. The old
         // fixed 3M-spin wait expired in far less wall-time under TCG and
         // printed the verdict before a live SYN-ACK arrived (seen last run).
         { int t0 = pit_get_ticks();
           while(!tcp_established() && (pit_get_ticks() - t0) < 1000){ rtl8139_pump_rx(); } }
+        if(tcp_established()){
+            serial_puts("TCP: STATE ESTABLISHED snd_nxt=");
+            { uint32_t v = tcp_snd_nxt();
+              for(int i=28;i>=0;i-=4){ uint8_t d=(v>>i)&0xF;
+                serial_putc(d<10?'0'+d:'A'+d-10); } }
+            serial_puts(" rcv_nxt=");
+            { uint32_t v = tcp_rcv_nxt();
+              for(int i=28;i>=0;i-=4){ uint8_t d=(v>>i)&0xF;
+                serial_putc(d<10?'0'+d:'A'+d-10); } }
+            serial_puts("\n");
+            static uint8_t hello[] = "HELLO PHASE9 FROM GUEST\n";
+            { int hl = (int)sizeof(hello) - 1;
+              if(tcp_send_data(hello, hl)){
+                  int t1 = pit_get_ticks();
+                  while((pit_get_ticks() - t1) < 1000){ rtl8139_pump_rx(); }
+              } }
+            serial_puts("TCP: DATA-DONE snd_nxt=");
+            { uint32_t v = tcp_snd_nxt();
+              for(int i=28;i>=0;i-=4){ uint8_t d=(v>>i)&0xF;
+                serial_putc(d<10?'0'+d:'A'+d-10); } }
+            serial_puts(" rcv_nxt=");
+            { uint32_t v = tcp_rcv_nxt();
+              for(int i=28;i>=0;i-=4){ uint8_t d=(v>>i)&0xF;
+                serial_putc(d<10?'0'+d:'A'+d-10); } }
+            serial_puts("\n");
+        }
         if(!tcp_established()){
             serial_puts("TCP: primary timeout (10s, no SYN-ACK), trying fallback 10.0.2.3:53\n");
             serial_puts("TCP: using target 10.0.2.3:53\n");
             tcp_handshake(tcp_fb, 53, 40002, 0x20000000u);
             { int t0 = pit_get_ticks();
               while(!tcp_established() && (pit_get_ticks() - t0) < 1000){ rtl8139_pump_rx(); } }
+            if(tcp_established()){
+                // DNS-over-TCP: 2-byte BE length + 29B query (kernel Phase 7 bytes).
+                static uint8_t dotcp[31];
+                dotcp[0]=0; dotcp[1]=29;
+                dotcp[2]=0x12; dotcp[3]=0x34; dotcp[4]=0x01; dotcp[5]=0x00;
+                dotcp[6]=0x00; dotcp[7]=0x01; dotcp[8]=0x00; dotcp[9]=0x00;
+                dotcp[10]=0x00; dotcp[11]=0x00; dotcp[12]=0x00; dotcp[13]=0x00;
+                dotcp[14]=7; dotcp[15]='e'; dotcp[16]='x'; dotcp[17]='a'; dotcp[18]='m';
+                dotcp[19]='p'; dotcp[20]='l'; dotcp[21]='e'; dotcp[22]=3;
+                dotcp[23]='c'; dotcp[24]='o'; dotcp[25]='m'; dotcp[26]=0;
+                dotcp[27]=0x00; dotcp[28]=0x01; dotcp[29]=0x00; dotcp[30]=0x01;
+                if(tcp_send_data(dotcp, 31)){
+                    int t1 = pit_get_ticks();
+                    while((pit_get_ticks() - t1) < 1000){ rtl8139_pump_rx(); }
+                }
+                serial_puts("TCP: FALLBACK-DONE (ACK proves delivery, not DNS answer)\n");
+            }
         }
         serial_puts("TCP: STATE: ");
         serial_puts(tcp_established()?"ESTABLISHED (SYN/SYN-ACK/ACK complete)":"NOT established (timeout - see RX log above)");

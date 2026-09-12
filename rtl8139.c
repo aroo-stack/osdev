@@ -791,12 +791,21 @@ int udp_send(uint8_t *dip, uint16_t dport, uint16_t sport, uint8_t *data, int le
 #define TCP_FLAG_SYN 0x02
 #define TCP_FLAG_ACK 0x10
 #define TCP_FLAG_RST 0x04
+#define TCP_FLAG_PSH 0x08
 #define TCP_WND 8192
 static int tcp_state = 0; // 0 IDLE, 1 SYN_SENT, 2 ESTABLISHED
 static uint8_t tcp_dip[4] = {0,0,0,0};
 static uint16_t tcp_dport = 0, tcp_sport = 0;
 static uint32_t tcp_iss = 0, tcp_theirs = 0;
+// Phase 9: next-byte sequence state. snd_nxt = next seq we will send
+// (iss+1 after handshake, += len per data send). rcv_nxt = next seq we
+// expect from them (theirs+1 after handshake, += payload per data RX).
+// ACK rule: our ack field always carries rcv_nxt; we accept their ack
+// only when it equals snd_nxt (nothing outstanding).
+static uint32_t snd_nxt = 0, rcv_nxt = 0;
 int tcp_established(void){ return tcp_state == 2; }
+uint32_t tcp_snd_nxt(void){ return snd_nxt; }
+uint32_t tcp_rcv_nxt(void){ return rcv_nxt; }
 
 static uint16_t tcp_checksum(uint8_t *sip, uint8_t *dip, uint8_t *t, int tlen){
     // tlen = TCP header + data; t[16..17] (checksum) must be zero on entry.
@@ -842,12 +851,79 @@ static int tcp_build_segment(uint8_t *frame, uint8_t *dmac,
     return 54;
 }
 
+// Phase 9: NEW data-path builder (handshake builder above untouched).
+// Address trace (IHL=5, no IP/TCP options):
+//   frame[0..5]=dmac, [6..11]=our MAC, [12..13]=0x0800
+//   ip=frame+14 (20B): [0]=0x45, [2..3]=total BE = 40+len,
+//     [4..5]=id, [8]=64 TTL, [9]=6 TCP, [10..11]=cksum,
+//     [12..15]=our IP, [16..19]=tcp_dip
+//   t=frame+34 (20B header + payload): sport[0..1], dport[2..3],
+//     seq[4..7]=snd_nxt, ack[8..11]=rcv_nxt, [12]=0x50 (off 5),
+//     [13]=flags (0x18 PSH|ACK), wnd[14..15], cksum[16..17] over
+//     20+len bytes (zeroed during compute), urgent[18..19]=0,
+//     payload t[20..20+len-1].
+// Returns 54+len sans pad; caller pads to 60B min.
+static int tcp_build_data_segment(uint8_t *frame, uint8_t *dmac,
+                                  uint16_t sport, uint16_t dport,
+                                  uint32_t seq, uint32_t ack, uint8_t flags,
+                                  uint8_t *payload, int len){
+    uint8_t mymac[6]; read_our_mac(mymac);
+    for(int i=0;i<6;i++){ frame[i] = dmac[i]; frame[6+i] = mymac[i]; }
+    frame[12] = 0x08; frame[13] = 0x00;
+    uint8_t *ip = &frame[14];
+    for(int i=0;i<20;i++) ip[i] = 0;
+    int ip_total = 40 + len;
+    ip[0] = 0x45; ip[2] = (uint8_t)(ip_total >> 8); ip[3] = (uint8_t)ip_total;
+    udp_ip_id++; ip[4] = (uint8_t)(udp_ip_id >> 8); ip[5] = (uint8_t)udp_ip_id;
+    ip[8] = 64; ip[9] = 6;
+    for(int i=0;i<4;i++){ ip[12+i] = net_our_ip[i]; ip[16+i] = tcp_dip[i]; }
+    { uint16_t c = ip_checksum(ip, 20); ip[10] = (uint8_t)(c >> 8); ip[11] = (uint8_t)c; }
+    uint8_t *t = &frame[34];
+    for(int i=0;i<20;i++) t[i] = 0;
+    t[0]=(uint8_t)(sport>>8); t[1]=(uint8_t)sport;
+    t[2]=(uint8_t)(dport>>8); t[3]=(uint8_t)dport;
+    t[4]=(uint8_t)(seq>>24); t[5]=(uint8_t)(seq>>16); t[6]=(uint8_t)(seq>>8); t[7]=(uint8_t)seq;
+    t[8]=(uint8_t)(ack>>24); t[9]=(uint8_t)(ack>>16); t[10]=(uint8_t)(ack>>8); t[11]=(uint8_t)ack;
+    t[12]=0x50; t[13]=flags;
+    t[14]=(uint8_t)(TCP_WND>>8); t[15]=(uint8_t)TCP_WND;
+    for(int i=0;i<len;i++) t[20+i] = payload[i];
+    { uint16_t c = tcp_checksum(net_our_ip, tcp_dip, t, 20+len);
+      t[16]=(uint8_t)(c>>8); t[17]=(uint8_t)c; }
+    return 54 + len;
+}
+
+int tcp_send_data(uint8_t *payload, int len){
+    if(tcp_state != 2){
+        s_puts("TCP: send_data skipped (not ESTABLISHED)\n"); return 0;
+    }
+    if(len < 0 || len > 400){ s_puts("TCP: send_data bad length\n"); return 0; }
+    uint8_t dmac[6];
+    if(!udp_resolve_mac(tcp_dip, dmac)){ s_puts("TCP: send_data no route\n"); return 0; }
+    static uint8_t seg[1024];
+    int slen = tcp_build_data_segment(seg, dmac, tcp_sport, tcp_dport,
+                                      snd_nxt, rcv_nxt,
+                                      (uint8_t)(TCP_FLAG_PSH|TCP_FLAG_ACK),
+                                      payload, len);
+    int flen = slen;
+    while(flen < 60){ seg[flen] = 0; flen++; }
+    { uint16_t sc = (uint16_t)(((uint16_t)seg[50] << 8) | seg[51]);
+      s_puts("TCP: TX DATA seq="); s_put_hex32(snd_nxt);
+      s_puts(" ack="); s_put_hex32(rcv_nxt);
+      s_puts(" len="); s_put_dec((uint32_t)len);
+      s_puts(" cksum="); s_put_hex16(sc); s_puts("\n"); }
+    int ok = rtl8139_tx_raw(seg, flen);
+    if(ok) snd_nxt += (uint32_t)len;
+    else s_puts("TCP: TX DATA TOK TIMEOUT (snd_nxt NOT advanced)\n");
+    return ok;
+}
+
 void tcp_handshake(uint8_t *dip, uint16_t dport, uint16_t sport, uint32_t iss){
     if(!initialized || !io_base || !net_configured){
         s_puts("TCP: handshake skipped (not ready)\n"); return;
     }
     for(int i=0;i<4;i++) tcp_dip[i] = dip[i];
     tcp_dport = dport; tcp_sport = sport; tcp_iss = iss; tcp_theirs = 0;
+    snd_nxt = 0; rcv_nxt = 0;
     uint8_t dmac[6];
     if(!udp_resolve_mac(dip, dmac)){ s_puts("TCP: no route (MAC unresolvable)\n"); return; }
     static uint8_t seg[128];
@@ -865,8 +941,9 @@ void tcp_handshake(uint8_t *dip, uint16_t dport, uint16_t sport, uint32_t iss){
 // Incoming TCP for OUR attempt only (strict 4-tuple match). Validates SYN-ACK
 // (flags SYN+ACK, ack == iss+1), records their ISN, sends final ACK
 // (seq = iss+1, ack = theirs+1), marks ESTABLISHED. RST aborts to IDLE.
+// Phase 9: also handles ESTABLISHED data/ACK input (see second half).
 void tcp_input(uint8_t *f, int framelen){
-    if(tcp_state != 1) return; // only expecting SYN-ACK while SYN_SENT
+    if(tcp_state != 1 && tcp_state != 2) return; // SYN_SENT or ESTABLISHED only
     int ihl = f[14] & 0x0F;
     if(ihl < 5) return;
     int to = 14 + ihl*4;
@@ -904,6 +981,63 @@ void tcp_input(uint8_t *f, int framelen){
             return;
         }
     }
+    // Phase 9: ESTABLISHED input. Common parse/checksum/RST above are
+    // shared; SYN-ACK acceptance below runs only in SYN_SENT.
+    if(tcp_state == 2){
+        int payload_len = tcp_len - off*4; // RX payload per spec
+        if(payload_len < 0){
+            s_puts("TCP: RX negative payload, dropping\n"); return;
+        }
+        // Pure ACK (no payload, ACK only, no SYN/FIN/RST): never re-ACK.
+        if(payload_len == 0 && flags == TCP_FLAG_ACK){
+            if(ack != snd_nxt){
+                s_puts("TCP: RX pure ACK ack="); s_put_hex32(ack);
+                s_puts(" (expect "); s_put_hex32(snd_nxt); s_puts("), no reply\n");
+            } else {
+                s_puts("TCP: RX pure ACK ack="); s_put_hex32(ack);
+                s_puts(" OK (== snd_nxt), no reply\n");
+            }
+            return;
+        }
+        // ACK rule: their ack must equal our snd_nxt (nothing outstanding).
+        if(ack != snd_nxt){
+            s_puts("TCP: RX ack="); s_put_hex32(ack);
+            s_puts(" (expect "); s_put_hex32(snd_nxt); s_puts("), logged\n");
+        }
+        // Unexpected SYN in ESTABLISHED: log, ignore (no re-handshake).
+        if(flags & TCP_FLAG_SYN){
+            s_puts("TCP: RX SYN in ESTABLISHED, ignoring\n"); return;
+        }
+        s_puts("TCP: RX DATA seq="); s_put_hex32(seq);
+        s_puts(" (expect "); s_put_hex32(rcv_nxt); s_puts(")");
+        s_puts(payload_len == 0 ? " no payload" : "");
+        s_puts("\n");
+        if(seq != rcv_nxt){
+            s_puts("TCP: seq mismatch, NOT advancing rcv_nxt\n"); return;
+        }
+        if(payload_len > 0){
+            if(payload_len > 400) payload_len = 400; // log cap, never overflow
+            s_puts("TCP: DATA len "); s_put_dec((uint32_t)payload_len); s_puts(" [");
+            for(int i=0;i<payload_len;i++){
+                uint8_t b = f[to+off*4+i];
+                s_putc((b >= 32 && b < 127) ? (char)b : '.');
+            }
+            s_puts("]\n");
+            rcv_nxt += (uint32_t)payload_len;
+            uint8_t dmac2[6];
+            if(!udp_resolve_mac(tcp_dip, dmac2)){ s_puts("TCP: route lost in ESTABLISHED\n"); return; }
+            static uint8_t packseg[128];
+            int plen = tcp_build_segment(packseg, dmac2, tcp_sport, tcp_dport,
+                                         snd_nxt, rcv_nxt, TCP_FLAG_ACK);
+            while(plen < 60){ packseg[plen] = 0; plen++; }
+            { uint16_t ac2 = (uint16_t)(((uint16_t)packseg[50] << 8) | packseg[51]);
+              s_puts("TCP: TX ACK seq="); s_put_hex32(snd_nxt);
+              s_puts(" ack="); s_put_hex32(rcv_nxt);
+              s_puts(" cksum="); s_put_hex16(ac2); s_puts("\n"); }
+            rtl8139_tx_raw(packseg, plen);
+        }
+        return;
+    }
     if((flags & (TCP_FLAG_SYN|TCP_FLAG_ACK)) != (TCP_FLAG_SYN|TCP_FLAG_ACK)){
         s_puts("TCP: not SYN-ACK (flags="); s_put_hex8(flags); s_puts("), ignoring\n"); return;
     }
@@ -930,10 +1064,12 @@ void tcp_input(uint8_t *f, int framelen){
                                 tcp_iss + 1, tcp_theirs + 1, TCP_FLAG_ACK);
     while(len < 60){ ackseg[len] = 0; len++; }
     tcp_state = 2; // ESTABLISHED (set before TX, same reason as SYN_SENT)
+    snd_nxt = tcp_iss + 1; rcv_nxt = tcp_theirs + 1;
     { uint16_t ac = (uint16_t)(((uint16_t)ackseg[50] << 8) | ackseg[51]); // cksum at ackseg[34+16]
       s_puts("TCP: TX ACK: seq="); s_put_hex32(tcp_iss+1);
       s_puts(" ack="); s_put_hex32(tcp_theirs+1);
       s_puts(" cksum="); s_put_hex16(ac); s_puts("\n"); }
     rtl8139_tx_raw(ackseg, len);
-    s_puts("TCP: ESTABLISHED (minimal PoC: no retransmit, no data, no close)\n");
+    s_puts("TCP: ESTABLISHED snd_nxt="); s_put_hex32(snd_nxt);
+    s_puts(" rcv_nxt="); s_put_hex32(rcv_nxt); s_puts("\n");
 }

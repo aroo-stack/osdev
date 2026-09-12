@@ -37,6 +37,12 @@ void udp_rx_consume(void);
 void tcp_handshake(uint8_t *dip, uint16_t dport, uint16_t sport, uint32_t iss);
 void tcp_input(uint8_t *f, int framelen);
 int tcp_established(void);
+// Phase 9: TCP data transfer (additive, handshake builder untouched).
+// tcp_send_data() sends PSH|ACK with seq=snd_nxt, ack=rcv_nxt; on TOK OK
+// snd_nxt advances by len. Accessors expose state for kernel.c logging.
+int tcp_send_data(uint8_t *payload, int len);
+uint32_t tcp_snd_nxt(void);
+uint32_t tcp_rcv_nxt(void);
 // Phase 6: ARP cache + request/reply. Table holds a few IP->MAC mappings
 // (same simple-global-state pattern as net_* config). Table lookup for TX
 // path use; store on valid replies/requests (RFC 826 merge rule).
