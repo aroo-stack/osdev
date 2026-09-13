@@ -273,7 +273,7 @@ static void calculator_init_window(int nid){
     w_strcpy(w->title, "Calculator", 32);
     w->bg_color=0x00E8E8E8; w->title_color=0x00226644; w->border_color=0x00000000;
     w->visible=1; w->minimized=0; w->z=window_count;
-    w->has_textbox=0; w->has_settings=0; w->has_paint=0;
+    w->has_textbox=0; w->has_settings=0; w->has_paint=0; w->has_about=0;
     w->has_calc=1;
     w->calc.display[0]='0'; w->calc.display[1]='.'; w->calc.display[2]='0'; w->calc.display[3]='0'; w->calc.display[4]=0; // "0.00"
     w->calc.acc=0; w->calc.op=0; w->calc.fresh=1; w->calc.err=0;
@@ -307,7 +307,7 @@ static void settings_init_window(int nid){
     w_strcpy(w->title, "Settings", 32);
     w->bg_color=0x00E0E4EA; w->title_color=0x00334155; w->border_color=0x00000000;
     w->visible=1; w->minimized=0; w->z=window_count;
-    w->has_textbox=0; w->has_calc=0; w->has_settings=1; w->has_paint=0;
+    w->has_textbox=0; w->has_calc=0; w->has_settings=1; w->has_paint=0; w->has_about=0;
     w->has_button=1; w->num_btns=0;
     for(int i=0;i<4;i++){ // wallpaper row: y=52 h=30, x=20/110/200/290 w=80 (ends 370)
         w->btns[i].x = 20+i*90; w->btns[i].y = 52;
@@ -331,7 +331,7 @@ static void settings_open_or_focus(void){
     int found = window_find_by_title("Settings");
     if(found != -1){
         s_puts("DESKTOP: action Settings bring to front\n");
-        if(windows[found].minimized) windows[found].minimized = 0;
+        if(windows[found].minimized){ windows[found].minimized = 0; taskbar_tabs_invalidate(); window_invalidate(found); }
         window_bring_to_front(found);
         return;
     }
@@ -340,7 +340,7 @@ static void settings_open_or_focus(void){
         int nid = window_count;
         settings_init_window(nid);
         z_order[window_count]=nid; window_count++; for(int i=0;i<window_count;i++) windows[z_order[i]].z=i;
-        s_puts("DESKTOP: created Settings\n"); window_invalidate(nid);
+        s_puts("DESKTOP: created Settings\n"); window_invalidate(nid); taskbar_tabs_invalidate();
     } else s_puts("DESKTOP: cannot create Settings - at max\n");
 }
 // Direct-SET (not cycle) via the same setters the old menu items called:
@@ -508,7 +508,7 @@ static void paint_init_window(int nid){
     w_strcpy(w->title, "Paint", 32);
     w->bg_color=0x00E8E8E8; w->title_color=0x00772222; w->border_color=0x00000000;
     w->visible=1; w->minimized=0; w->z=window_count;
-    w->has_textbox=0; w->has_calc=0; w->has_settings=0; w->has_paint=1;
+    w->has_textbox=0; w->has_calc=0; w->has_settings=0; w->has_paint=1; w->has_about=0;
     w->has_button=1; w->num_btns=0;
     for(int i=0;i<6;i++){
         w->btns[i].x = 10+i*68; w->btns[i].y = 30;
@@ -525,7 +525,7 @@ static void paint_open_or_focus(void){
     int found = window_find_by_title("Paint");
     if(found != -1){
         s_puts("DESKTOP: action Paint bring to front\n");
-        if(windows[found].minimized) windows[found].minimized = 0;
+        if(windows[found].minimized){ windows[found].minimized = 0; taskbar_tabs_invalidate(); window_invalidate(found); }
         window_bring_to_front(found);
         return;
     }
@@ -534,7 +534,7 @@ static void paint_open_or_focus(void){
         int nid = window_count;
         paint_init_window(nid);
         z_order[window_count]=nid; window_count++; for(int i=0;i<window_count;i++) windows[z_order[i]].z=i;
-        s_puts("DESKTOP: created Paint\n"); window_invalidate(nid);
+        s_puts("DESKTOP: created Paint\n"); window_invalidate(nid); taskbar_tabs_invalidate();
     } else s_puts("DESKTOP: cannot create Paint - at max\n");
 }
 
@@ -658,6 +658,30 @@ static int calc_display_h(int wh){ int dh = wh*10/100; if(dh < 30) dh = 30; if(d
 static int calc_display_scale(int dh){ int s = (dh-8)/16; if(s < 1) s = 1; if(s > 4) s = 4; return s; }
 static int calc_grid_y0(int dh){ return 30 + dh + 16; }
 
+// --- About This OS: freestanding number formatters (no snprintf in -nostdlib).
+// about_u32 appends decimal digits of v to dst at *p (no NUL). about_u32w pads
+// to at least w digits with leading zeros (clock fields). about_ip appends
+// dotted-decimal a.b.c.d. All bounds-checked against cap.
+static void about_u32(char *dst, int *p, int cap, uint32_t v){
+    char rev[12]; int r = 0;
+    if(v == 0) rev[r++] = '0';
+    else while(v > 0 && r < 12){ rev[r++] = (char)('0' + v % 10); v /= 10; }
+    while(r-- > 0 && *p < cap) dst[(*p)++] = rev[r];
+}
+static void about_u32w(char *dst, int *p, int cap, uint32_t v, int w){
+    char rev[12]; int r = 0;
+    if(v == 0) rev[r++] = '0';
+    else while(v > 0 && r < 12){ rev[r++] = (char)('0' + v % 10); v /= 10; }
+    while(r < w && *p < cap){ dst[(*p)++] = '0'; w--; } // leading zeros first
+    while(r-- > 0 && *p < cap) dst[(*p)++] = rev[r];
+}
+static void about_ip(char *dst, int *p, int cap, uint8_t *a){
+    for(int i=0;i<4;i++){
+        about_u32(dst, p, cap, a[i]);
+        if(i < 3 && *p < cap) dst[(*p)++] = '.';
+    }
+}
+
 // Responsive layout: recompute AND STORE every widget rect from the window's
 // CURRENT w/h at the start of every redraw. Hit-testing reads these same stored
 // rects, so visuals and hit-test share one source of truth and cannot drift.
@@ -773,6 +797,92 @@ static void window_draw_single(int idx){
             gfx_draw_rect_outline(ax-2, ay-2, bw+4, bh+4, 0x00106428);
             gfx_draw_rect_outline(ax-1, ay-1, bw+2, bh+2, 0x0016A34A);
         }
+    }
+    // About This OS: live read-only stats, NO background task (purely reactive
+    // like Calculator: every value is read from its owner at draw time, no
+    // duplicate state stored here). Refreshed by the same periodic
+    // window_invalidate in kernel.c's main loop that drives Task Manager.
+    if(w->has_about){
+        extern const char *about_build_stamp(void);
+        extern int pit_get_ticks(void);
+        extern void pit_get_task_ticks(int *gui, int *a, int *b);
+        extern void pit_get_cpu_percent(int *gui_pct, int *a_pct, int *b_pct);
+        extern int task_exists(int id);
+        extern int net_configured;
+        extern uint8_t net_our_ip[4];
+        extern uint8_t net_gw[4];
+        int tx = w->x + 12;
+        int ty = w->y + 32;
+        const int step = 14;
+        char line[64]; int p;
+        // Build stamp (single source: kernel.c accessor, same string as boot log).
+        p = 0; { const char *pfx="Build: "; while(*pfx && p<63) line[p++]=*pfx++;
+            const char *s = about_build_stamp(); while(*s && p<63) line[p++]=*s++; }
+        line[p]=0; gfx_draw_string(tx, ty, line, 0x00000000); ty += step;
+        // Uptime from PIT (100Hz): total seconds -> H:MM:SS, hours unbounded.
+        { uint32_t total = (uint32_t)pit_get_ticks() / 100;
+          p = 0; { const char *pfx="Uptime: "; while(*pfx && p<63) line[p++]=*pfx++; }
+          about_u32(line, &p, 63, total / 3600);
+          if(p<63) line[p++]=':';
+          about_u32w(line, &p, 63, (total / 60) % 60, 2);
+          if(p<63) line[p++]=':';
+          about_u32w(line, &p, 63, total % 60, 2);
+          line[p]=0; }
+        gfx_draw_string(tx, ty, line, 0x00000000); ty += step;
+        // Resolution (live framebuffer size).
+        { p = 0; { const char *pfx="Res: "; while(*pfx && p<63) line[p++]=*pfx++; }
+          about_u32(line, &p, 63, fb_get_width());
+          if(p<63) line[p++]='x';
+          about_u32(line, &p, 63, fb_get_height());
+          line[p]=0; }
+        gfx_draw_string(tx, ty, line, 0x00000000); ty += step;
+        // PMM frames (owner: pmm.c counters, same values as boot log).
+        { p = 0; { const char *pfx="Mem: "; while(*pfx && p<63) line[p++]=*pfx++; }
+          about_u32(line, &p, 63, pmm_free_frames());
+          { const char *m=" free / "; while(*m && p<63) line[p++]=*m++; }
+          about_u32(line, &p, 63, pmm_total_frames());
+          { const char *m=" total frames"; while(*m && p<63) line[p++]=*m++; }
+          line[p]=0; }
+        gfx_draw_string(tx, ty, line, 0x00000000); ty += step;
+        // CPU ticks + percent (owner: PIT per-task counters, same source as
+        // Task Manager; killed tasks omitted the same way).
+        { int gui=0,a=0,b=0,gp=0,ap=0,bp=0;
+          pit_get_task_ticks(&gui,&a,&b); pit_get_cpu_percent(&gp,&ap,&bp);
+          p = 0; { const char *pfx="CPU GUI "; while(*pfx && p<63) line[p++]=*pfx++; }
+          about_u32(line, &p, 63, (uint32_t)gui);
+          { const char *m=" ("; while(*m && p<63) line[p++]=*m++; }
+          about_u32(line, &p, 63, (uint32_t)gp);
+          { const char *m="%)"; while(*m && p<63) line[p++]=*m++; }
+          line[p]=0; gfx_draw_string(tx, ty, line, 0x00000000); ty += step;
+          if(task_exists(1)){
+              p = 0; { const char *pfx="CPU Clicker "; while(*pfx && p<63) line[p++]=*pfx++; }
+              about_u32(line, &p, 63, (uint32_t)a);
+              { const char *m=" ("; while(*m && p<63) line[p++]=*m++; }
+              about_u32(line, &p, 63, (uint32_t)ap);
+              { const char *m="%)"; while(*m && p<63) line[p++]=*m++; }
+              line[p]=0; gfx_draw_string(tx, ty, line, 0x00000000); ty += step;
+          }
+          if(task_exists(2)){
+              p = 0; { const char *pfx="CPU Notes "; while(*pfx && p<63) line[p++]=*pfx++; }
+              about_u32(line, &p, 63, (uint32_t)b);
+              { const char *m=" ("; while(*m && p<63) line[p++]=*m++; }
+              about_u32(line, &p, 63, (uint32_t)bp);
+              { const char *m="%)"; while(*m && p<63) line[p++]=*m++; }
+              line[p]=0; gfx_draw_string(tx, ty, line, 0x00000000); ty += step;
+          }
+        }
+        // Network (owner: DHCP globals in rtl8139.c; no copy stored here).
+        if(net_configured){
+            p = 0; { const char *pfx="Net: "; while(*pfx && p<63) line[p++]=*pfx++; }
+            about_ip(line, &p, 63, net_our_ip);
+            { const char *m=" gw "; while(*m && p<63) line[p++]=*m++; }
+            about_ip(line, &p, 63, net_gw);
+            line[p]=0;
+        } else {
+            p = 0; { const char *m="Net: Not connected"; while(*m && p<63) line[p++]=*m++; }
+            line[p]=0;
+        }
+        gfx_draw_string(tx, ty, line, 0x00000000);
     }
     if(w->title[0]=='T' && w->title[1]=='a' && w->title[5]=='M'){
         extern void pit_get_task_ticks(int *gui, int *a, int *b);
@@ -965,8 +1075,9 @@ void desktop_icons_init(void){
     desktop_icons[4].x = 20; desktop_icons[4].y = 440; w_strcpy(desktop_icons[4].label, "Calculator", 32); desktop_icons[4].color = 0x00226644; desktop_icons[4].selected = 0;
     desktop_icons[5].x = 20; desktop_icons[5].y = 540; w_strcpy(desktop_icons[5].label, "Settings", 32); desktop_icons[5].color = 0x00334155; desktop_icons[5].selected = 0;
     desktop_icons[6].x = 20; desktop_icons[6].y = 640; w_strcpy(desktop_icons[6].label, "Paint", 32); desktop_icons[6].color = 0x00772222; desktop_icons[6].selected = 0;
-    desktop_icon_count = 7;
-    s_puts("DESKTOP: icons init 7 at (20,40) New Window, (20,140) Task Manager, (20,240) Clicker, (20,340) Notes, (20,440) Calculator, (20,540) Settings, (20,640) Paint\n");
+    desktop_icons[7].x = 20; desktop_icons[7].y = 740; w_strcpy(desktop_icons[7].label, "About", 32); desktop_icons[7].color = 0x001F4E79; desktop_icons[7].selected = 0;
+    desktop_icon_count = 8;
+    s_puts("DESKTOP: icons init 8 at (20,40) New Window, (20,140) Task Manager, (20,240) Clicker, (20,340) Notes, (20,440) Calculator, (20,540) Settings, (20,640) Paint, (20,740) About\n");
 }
 // Notes icon: white notepad sheet with gray rules, teal top bar, silver spiral
 // binding, navy fountain pen, and a solid offset drop shadow. Painted with
@@ -1167,6 +1278,20 @@ static void draw_paint_icon(int gx, int gy){
     gfx_draw_line(px+14, py+10, px+16, py+8, 0x00222222);
     fb_draw_rect(px+16, py+8, 1, 1, 0x00222222);
 }
+// About icon: navy badge tile with a white info disc and navy "i".
+// Same 32x32 canvas and solid-primitive style as the other glyphs.
+static void draw_about_icon(int gx, int gy){
+    uint32_t tile = 0x001F4E79;     // navy badge tile
+    uint32_t edge = 0x00000000;
+    uint32_t disc = 0x00FFFFFF;     // info disc
+    uint32_t shadow = 0x00141824;   // drop shadow
+    int bx = gx + 4, by = gy + 4;   // 24x24 tile centered in canvas
+    fb_draw_rect(bx+2, by+2, 24, 24, shadow);
+    fb_draw_rect(bx, by, 24, 24, tile);
+    gfx_draw_rect_outline(bx, by, 24, 24, edge);
+    gfx_draw_filled_circle(bx+12, by+13, 8, disc);
+    gfx_draw_string(bx+9, by+8, "i", tile);
+}
 void desktop_icons_draw(void){
     if(!fb_is_available()) return;
     for(int i=0;i<desktop_icon_count;i++){
@@ -1182,6 +1307,7 @@ void desktop_icons_draw(void){
         else if(i==4){ draw_calc_icon(gx, gy); }
         else if(i==5){ draw_settings_icon(gx, gy); }
         else if(i==6){ draw_paint_icon(gx, gy); }
+        else if(i==7){ draw_about_icon(gx, gy); }
         int len=0; while(ic->label[len] && len<32) len++;
         int tx = ix + (ICON_W - len*8)/2; int ty = iy + 4 + ICON_GLYPH + 6;
         if(ic->selected){ int bg_w = len*8 + 6; int bg_h = 10; int bg_x = tx - 3; int bg_y = ty - 1; fb_draw_rect(bg_x, bg_y, bg_w, bg_h, 0x000000FF); gfx_draw_string(tx, ty, ic->label, 0x00FFFFFF); }
@@ -1208,10 +1334,10 @@ int desktop_icon_handle_click(int x, int y){
         s_puts("DESKTOP: double-click icon "); s_put_dec(idx); s_puts("\n");
         for(int i=0;i<desktop_icon_count;i++) desktop_icons[i].selected = (i==idx); selected_icon = idx; last_click_icon = -1; last_click_tick = -1000;
         if(idx==0){ s_puts("DESKTOP: action New Window\n"); window_create_new(); }
-        else if(idx==1){ int found=-1; for(int i=0;i<window_count;i++) if(icon_streq(windows[i].title, "Task Manager")) { found=i; break; } if(found!=-1){ s_puts("DESKTOP: action Task Manager bring to front\n"); if(windows[found].minimized){ windows[found].minimized=0; s_puts("DESKTOP: unminimize Task Manager\n"); } window_bring_to_front(found); } else { s_puts("DESKTOP: action Task Manager create (was closed)\n"); if(window_count < MAX_WINDOWS){ int nid = window_count; windows[nid].x=600; windows[nid].y=100; windows[nid].w=300; windows[nid].h=200; w_strcpy(windows[nid].title, "Task Manager", 32); windows[nid].bg_color=0x00F0F0F0; windows[nid].title_color=0x00333333; windows[nid].border_color=0x00000000; windows[nid].visible=1; windows[nid].minimized=0; windows[nid].z=window_count; windows[nid].has_button=0; windows[nid].num_btns=0; windows[nid].has_textbox=0; windows[nid].has_calc=0; windows[nid].has_settings=0; windows[nid].has_paint=0; windows[nid].task_counter=0; z_order[window_count]=nid; window_count++; for(int i=0;i<window_count;i++) windows[z_order[i]].z=i; s_puts("DESKTOP: created Task Manager\n"); window_invalidate(nid); } else s_puts("DESKTOP: cannot create Task Manager - at max\n"); } }
+        else if(idx==1){ int found=-1; for(int i=0;i<window_count;i++) if(icon_streq(windows[i].title, "Task Manager")) { found=i; break; } if(found!=-1){ s_puts("DESKTOP: action Task Manager bring to front\n"); if(windows[found].minimized){ windows[found].minimized=0; s_puts("DESKTOP: unminimize Task Manager\n"); taskbar_tabs_invalidate(); window_invalidate(found); } window_bring_to_front(found); } else { s_puts("DESKTOP: action Task Manager create (was closed)\n"); if(window_count < MAX_WINDOWS){ int nid = window_count; windows[nid].x=600; windows[nid].y=100; windows[nid].w=300; windows[nid].h=200; w_strcpy(windows[nid].title, "Task Manager", 32); windows[nid].bg_color=0x00F0F0F0; windows[nid].title_color=0x00333333; windows[nid].border_color=0x00000000; windows[nid].visible=1; windows[nid].minimized=0; windows[nid].z=window_count; windows[nid].has_button=0; windows[nid].num_btns=0; windows[nid].has_textbox=0; windows[nid].has_calc=0; windows[nid].has_settings=0; windows[nid].has_paint=0; windows[nid].has_about=0; windows[nid].task_counter=0; z_order[window_count]=nid; window_count++; for(int i=0;i<window_count;i++) windows[z_order[i]].z=i; s_puts("DESKTOP: created Task Manager\n"); window_invalidate(nid); taskbar_tabs_invalidate(); } else s_puts("DESKTOP: cannot create Task Manager - at max\n"); } }
         else if(idx==2){ // Clicker
             int found=-1; for(int i=0;i<window_count;i++) if(icon_streq(windows[i].title, "Clicker")) { found=i; break; }
-            if(found!=-1){ s_puts("DESKTOP: action Clicker bring to front\n"); if(windows[found].minimized){ windows[found].minimized=0; } window_bring_to_front(found); }
+            if(found!=-1){ s_puts("DESKTOP: action Clicker bring to front\n"); if(windows[found].minimized){ windows[found].minimized=0; taskbar_tabs_invalidate(); window_invalidate(found); } window_bring_to_front(found); }
             else {
                 s_puts("DESKTOP: action Clicker create (was closed)\n");
                 // Recreate window + task pair fresh - check if Clicker task exists, if not, recreate
@@ -1230,15 +1356,15 @@ int desktop_icon_handle_click(int x, int y){
                     windows[nid].bg_color=0x00E0E0E0; windows[nid].title_color=0x00336699; windows[nid].border_color=0x00000000;
                     windows[nid].visible=1; windows[nid].minimized=0; windows[nid].z=window_count; windows[nid].has_button=1; windows[nid].num_btns=1;
                     windows[nid].btns[0].x=20; windows[nid].btns[0].y=40; windows[nid].btns[0].w=120; windows[nid].btns[0].h=30; w_strcpy(windows[nid].btns[0].label, "Click Me", 32); windows[nid].btns[0].pressed=0; windows[nid].btns[0].clicks=0;
-                    windows[nid].has_textbox=0; windows[nid].has_calc=0; windows[nid].has_settings=0; windows[nid].has_paint=0; windows[nid].task_counter=0;
+                    windows[nid].has_textbox=0; windows[nid].has_calc=0; windows[nid].has_settings=0; windows[nid].has_paint=0; windows[nid].has_about=0; windows[nid].task_counter=0;
                     z_order[window_count]=nid; window_count++; for(int i=0;i<window_count;i++) windows[z_order[i]].z=i;
-                    s_puts("DESKTOP: created Clicker\n"); window_invalidate(nid);
+                    s_puts("DESKTOP: created Clicker\n"); window_invalidate(nid); taskbar_tabs_invalidate();
                 } else s_puts("DESKTOP: cannot create Clicker - at max\n");
             }
         }
         else if(idx==3){ // Notes
             int found=-1; for(int i=0;i<window_count;i++) if(icon_streq(windows[i].title, "Notes")) { found=i; break; }
-            if(found!=-1){ s_puts("DESKTOP: action Notes bring to front\n"); if(windows[found].minimized){ windows[found].minimized=0; } window_bring_to_front(found); }
+            if(found!=-1){ s_puts("DESKTOP: action Notes bring to front\n"); if(windows[found].minimized){ windows[found].minimized=0; taskbar_tabs_invalidate(); window_invalidate(found); } window_bring_to_front(found); }
             else {
                 s_puts("DESKTOP: action Notes create (was closed)\n");
                 extern void task_notes_entry(void);
@@ -1253,24 +1379,24 @@ int desktop_icon_handle_click(int x, int y){
                     windows[nid].x=250; windows[nid].y=180; windows[nid].w=400; windows[nid].h=300;
                     w_strcpy(windows[nid].title, "Notes", 32);
                     windows[nid].bg_color=0x00D0D0FF; windows[nid].title_color=0x00993333; windows[nid].border_color=0x00000000;
-                    windows[nid].visible=1; windows[nid].minimized=0; windows[nid].z=window_count; windows[nid].has_button=0; windows[nid].num_btns=0; windows[nid].has_textbox=1; windows[nid].has_calc=0; windows[nid].has_settings=0; windows[nid].has_paint=0;
+                    windows[nid].visible=1; windows[nid].minimized=0; windows[nid].z=window_count; windows[nid].has_button=0; windows[nid].num_btns=0; windows[nid].has_textbox=1; windows[nid].has_calc=0; windows[nid].has_settings=0; windows[nid].has_paint=0; windows[nid].has_about=0;
                     windows[nid].tbox.x=20; windows[nid].tbox.y=40; windows[nid].tbox.w=360; windows[nid].tbox.h=60; windows[nid].tbox.max_len=512; notes_restore_to(nid); // placeholder rect: layout_sync recomputes; session text (empty on fresh boot)
                     windows[nid].task_counter=0;
                     z_order[window_count]=nid; window_count++; for(int i=0;i<window_count;i++) windows[z_order[i]].z=i;
-                    s_puts("DESKTOP: created Notes\n"); window_invalidate(nid);
+                    s_puts("DESKTOP: created Notes\n"); window_invalidate(nid); taskbar_tabs_invalidate();
                 } else s_puts("DESKTOP: cannot create Notes - at max\n");
             }
         }
         else if(idx==4){ // Calculator - window only, NO background task (purely reactive)
             int found=-1; for(int i=0;i<window_count;i++) if(icon_streq(windows[i].title, "Calculator")) { found=i; break; }
-            if(found!=-1){ s_puts("DESKTOP: action Calculator bring to front\n"); if(windows[found].minimized){ windows[found].minimized=0; } window_bring_to_front(found); }
+            if(found!=-1){ s_puts("DESKTOP: action Calculator bring to front\n"); if(windows[found].minimized){ windows[found].minimized=0; taskbar_tabs_invalidate(); window_invalidate(found); } window_bring_to_front(found); }
             else {
                 s_puts("DESKTOP: action Calculator create (was closed)\n");
                 if(window_count < MAX_WINDOWS){
                     int nid = window_count;
                     calculator_init_window(nid);
                     z_order[window_count]=nid; window_count++; for(int i=0;i<window_count;i++) windows[z_order[i]].z=i;
-                    s_puts("DESKTOP: created Calculator\n"); window_invalidate(nid);
+                    s_puts("DESKTOP: created Calculator\n"); window_invalidate(nid); taskbar_tabs_invalidate();
                 } else s_puts("DESKTOP: cannot create Calculator - at max\n");
             }
         }
@@ -1279,6 +1405,23 @@ int desktop_icon_handle_click(int x, int y){
         }
         else if(idx==6){ // Paint - window only, NO background task (purely reactive)
             paint_open_or_focus();
+        }
+        else if(idx==7){ // About - window only, NO background task (purely reactive like Calculator)
+            int found=-1; for(int i=0;i<window_count;i++) if(icon_streq(windows[i].title, "About")) { found=i; break; }
+            if(found!=-1){ s_puts("DESKTOP: action About bring to front\n"); if(windows[found].minimized){ windows[found].minimized=0; taskbar_tabs_invalidate(); window_invalidate(found); } window_bring_to_front(found); }
+            else {
+                s_puts("DESKTOP: action About create (was closed)\n");
+                if(window_count < MAX_WINDOWS){
+                    int nid = window_count;
+                    windows[nid].x=640; windows[nid].y=140; windows[nid].w=360; windows[nid].h=250;
+                    w_strcpy(windows[nid].title, "About", 32);
+                    windows[nid].bg_color=0x00F5F5F0; windows[nid].title_color=0x001F4E79; windows[nid].border_color=0x00000000;
+                    windows[nid].visible=1; windows[nid].minimized=0; windows[nid].z=window_count; windows[nid].has_button=0; windows[nid].num_btns=0;
+                    windows[nid].has_textbox=0; windows[nid].has_calc=0; windows[nid].has_settings=0; windows[nid].has_paint=0; windows[nid].has_about=1; windows[nid].task_counter=0;
+                    z_order[window_count]=nid; window_count++; for(int i=0;i<window_count;i++) windows[z_order[i]].z=i;
+                    s_puts("DESKTOP: created About\n"); window_invalidate(nid); taskbar_tabs_invalidate();
+                } else s_puts("DESKTOP: cannot create About - at max\n");
+            }
         }
         // No flag: every create/bring sub-action above invalidates its own rect.
         return 1;
@@ -1306,7 +1449,7 @@ void window_manager_init(void){
     windows[0].z = 0;
     windows[0].has_button = 1;
     windows[0].num_btns = 1; // single button at index 0 (was struct button btn)
-    windows[0].has_textbox = 0; windows[0].has_calc = 0; windows[0].has_settings = 0; windows[0].has_paint = 0;
+    windows[0].has_textbox = 0; windows[0].has_calc = 0; windows[0].has_settings = 0; windows[0].has_paint = 0; windows[0].has_about = 0;
     windows[0].btns[0].x = 20; windows[0].btns[0].y = 40; windows[0].btns[0].w = 120; windows[0].btns[0].h = 30;
     w_strcpy(windows[0].btns[0].label, "Click Me", 32);
     windows[0].btns[0].pressed = 0;
@@ -1324,6 +1467,7 @@ void window_manager_init(void){
     windows[1].has_calc = 0;
     windows[1].has_settings = 0;
     windows[1].has_paint = 0;
+    windows[1].has_about = 0;
     windows[1].has_textbox = 1;
     windows[1].tbox.x = 20; windows[1].tbox.y = 40; windows[1].tbox.w = 360; windows[1].tbox.h = 60; // placeholder: layout_sync_window recomputes from w/h on first redraw (-> 360x220 at 400x300)
     windows[1].tbox.max_len = 512;
@@ -1336,16 +1480,16 @@ void window_manager_init(void){
     windows[1].task_counter = 0;
 
     windows[2].x = 0; windows[2].y = 0; windows[2].w = 0; windows[2].h = 0;
-    windows[2].visible = 0; windows[2].minimized = 0; windows[2].has_button = 0; windows[2].num_btns = 0; windows[2].has_textbox = 0; windows[2].has_calc = 0; windows[2].has_settings = 0; windows[2].has_paint = 0; windows[2].task_counter = 0;
+    windows[2].visible = 0; windows[2].minimized = 0; windows[2].has_button = 0; windows[2].num_btns = 0; windows[2].has_textbox = 0; windows[2].has_calc = 0; windows[2].has_settings = 0; windows[2].has_paint = 0; windows[2].has_about = 0; windows[2].task_counter = 0;
     windows[3].x = 0; windows[3].y = 0; windows[3].w = 0; windows[3].h = 0;
-    windows[3].visible = 0; windows[3].minimized = 0; windows[3].has_button = 0; windows[3].num_btns = 0; windows[3].has_textbox = 0; windows[3].has_calc = 0; windows[3].has_settings = 0; windows[3].has_paint = 0; windows[3].task_counter = 0;
+    windows[3].visible = 0; windows[3].minimized = 0; windows[3].has_button = 0; windows[3].num_btns = 0; windows[3].has_textbox = 0; windows[3].has_calc = 0; windows[3].has_settings = 0; windows[3].has_paint = 0; windows[3].has_about = 0; windows[3].task_counter = 0;
 
     window_count = 2;
     // z_order 0..1 back->front corresponds to windows index order initially
     for(int i=0;i<window_count;i++) z_order[i]=i;
 
     desktop_icons_init();
-    s_puts("WM: created 2 windows (Clicker button, Notes textbox) + 6 desktop icons\n");
+    s_puts("WM: created 2 windows (Clicker button, Notes textbox) + 8 desktop icons\n");
     // Build wallpaper cache once (draws Bliss then snapshots, measures flat vs Bliss vs blit)
     wallpaper_cache_build_once();
     // Boot paints full screen directly (not via do_redraw): explicit full bounds.
@@ -1450,6 +1594,7 @@ int window_create_new(void){
     windows[idx].has_calc = 0;
     windows[idx].has_settings = 0;
     windows[idx].has_paint = 0;
+    windows[idx].has_about = 0;
     windows[idx].task_counter = 0;
     z_order[window_count] = idx;
     window_count++;
@@ -1457,6 +1602,7 @@ int window_create_new(void){
     s_puts("WM: created Window "); s_put_dec(idx+1); s_puts(" at "); s_put_dec(base_x); s_putc(','); s_put_dec(base_y);
     s_puts(" count now "); s_put_dec(window_count); s_puts("\n");
     window_invalidate(idx); // new window bounds (only new pixels + covered-behind)
+    taskbar_tabs_invalidate(); // new tab appended to the strip
     return idx;
 }
 
@@ -1899,6 +2045,26 @@ void taskbar_clock_invalidate(void){
     int cx = fw - 30 - 5 - 10 - 8*8;
     dirty_add(cx-2, fh-TASKBAR_H+3+6-2, 8*8+4, 12);
 }
+void taskbar_tabs_invalidate(void){
+    // Full tab strip: tabs live at x=5+i*155 (w=150), y=ty+3 (h=24) for up to
+    // MAX_WINDOWS slots, so union x=0..5+MAX_WINDOWS*155, y=ty..ty+TASKBAR_H.
+    // WHY this exists (traced): every tab-mutating op (create/close/z-shift/
+    // minimize recolor) used to dirty only window bounds, never the strip.
+    // taskbar_draw runs clipped to the dirty union, so a strip-touching union
+    // from an unrelated op repainted CURRENT (shifted) tabs over a sub-rect
+    // while pixels outside kept STALE (pre-shift) tabs - half-old/half-new
+    // glyphs where the clip edge sliced text ("Click" + outline ghosts that
+    // "self-correct" on the next full-strip touch). Unioning the whole strip
+    // here makes every tab mutation repaint atomically. Cost ~37k px on
+    // discrete clicks only; steady-state (1Hz clock, TaskMan/About refresh)
+    // is untouched.
+    int fh = (int)fb_get_height();
+    int w = 5 + MAX_WINDOWS * (150 + 5);
+    dirty_add(0, fh-TASKBAR_H, w, TASKBAR_H);
+    s_puts("TASKBAR: tabs dirty (0,"); s_put_dec((uint32_t)(fh-TASKBAR_H));
+    s_puts(","); s_put_dec((uint32_t)w); s_puts("x"); s_put_dec((uint32_t)TASKBAR_H);
+    s_puts(")\n");
+}
 
 void window_manager_draw_all(void){
     if(!fb_is_available()) return;
@@ -1988,6 +2154,7 @@ int window_bring_to_front(int idx){
     // Raised window's rect suffices: it repaints fully (was partially covered),
     // and newly-covered parts of others need no paint (painted over in z-order).
     window_invalidate(idx);
+    taskbar_tabs_invalidate(); // front-highlight color moved to another tab
     return 1;
 }
 
@@ -2141,6 +2308,7 @@ void window_update_resize(int x, int y){
     int min_w = WIN_MIN_W;
     int min_h = WIN_MIN_H;
     if(w->has_paint){ min_w = 430; min_h = 200; }
+    else if(w->has_about){ min_w = 320; min_h = 220; }
     else if(w->has_settings){ min_w = 380; min_h = 220; }
     else if(w->has_calc){ min_w = 240; min_h = 240; }
     else if(w->has_textbox){ if(min_w < 200) min_w = 200; if(min_h < 140) min_h = 140; }
@@ -2211,6 +2379,7 @@ int window_handle_minimize_click(int x, int y){
         w->tbox.focused = 0; // unfocus textbox when minimized
         s_puts("WM: minimize Window "); s_put_dec(idx+1); s_puts("\n");
         window_invalidate(idx); // windows behind repaint the hole
+        taskbar_tabs_invalidate(); // tab recolored to minimized-dark
         return 1;
     }
     return 0;
@@ -2313,6 +2482,9 @@ void window_close(int idx){
         else s_puts("WM: app Notes closed, task already not running\n");
     }
     // No flag here: bounds already invalidated at close entry (above).
+    // Strip MUST be dirtied separately: remaining tabs shifted left and the
+    // last slot is stale (this was the garbled-tabs root cause).
+    taskbar_tabs_invalidate();
 }
 int window_find_by_title(const char *title){
     for(int i=0;i<window_count;i++) if(icon_streq(windows[i].title, title)) return i;
@@ -2348,6 +2520,8 @@ int window_handle_taskbar_click(int x, int y){
             if(w->minimized){
                 w->minimized = 0;
                 s_puts("WM: unminimize Window "); s_put_dec(i+1); s_puts("\n");
+                taskbar_tabs_invalidate(); // tab recolored (bring_to_front may no-op if already front)
+                window_invalidate(i); // reappeared window repaints even if bring_to_front no-ops
             }
             // Bring to front (if not already)
             return window_bring_to_front(i);

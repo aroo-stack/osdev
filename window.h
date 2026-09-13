@@ -12,7 +12,7 @@
 #define RESIZE_HANDLE 12
 #define WIN_MIN_W 150
 #define WIN_MIN_H 100
-#define MAX_ICONS 7
+#define MAX_ICONS 8
 #define ICON_W 64
 #define ICON_H 64
 #define ICON_GLYPH 32
@@ -61,6 +61,7 @@ struct window {
     int has_calc; // 1 = Calculator app window (no background task, purely reactive)
     int has_settings; // 1 = Settings app window (no task; multi-button option grid)
     int has_paint; // 1 = Paint app window (no task; palette buttons + canvas)
+    int has_about; // 1 = About This OS window (no task; live read-only stats)
     volatile int task_counter; // owned by Clicker/Notes tasks, drawn by GUI task - single-word atomic
 };
 extern struct window windows[];
@@ -139,6 +140,7 @@ void dirty_add(int x, int y, int w, int h);
 void dirty_all(void);
 void window_invalidate(int idx); // union window bounds (validated)
 void taskbar_clock_invalidate(void); // union clock digit area
+void taskbar_tabs_invalidate(void); // union full tab strip (tab add/remove/shift/recolor)
 extern volatile int g_needs_redraw;
 extern volatile int g_in_redraw;
 // button - Phase 12

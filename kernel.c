@@ -16,6 +16,10 @@
 #include "rtl8139.h"
 #include "buildstamp.h"
 
+#ifndef TCP_BOOT_TEST
+#define TCP_BOOT_TEST 0
+#endif
+
 static inline void outb(uint16_t port, uint8_t val) {
     __asm__ volatile ("outb %0, %1" : : "a"(val), "Nd"(port));
 }
@@ -106,8 +110,11 @@ void task_notes_entry(void){
     }
 }
 
-void kernel_main(uint32_t magic, uint32_t mbi_addr) {
-    serial_init();
+// About-window accessor: single source of truth for the build stamp
+// (window.c reads it via this function so it never duplicates the string).
+const char *about_build_stamp(void){ return BUILD_STAMP; }
+
+void kernel_main(uint32_t magic, uint32_t mbi_addr) {    serial_init();
     serial_puts("BUILD: ");
     serial_puts(BUILD_STAMP);
     serial_puts("\n");
@@ -533,6 +540,7 @@ void kernel_main(uint32_t magic, uint32_t mbi_addr) {
         serial_puts("\n");
         udp_rx_consume();
     }
+#if TCP_BOOT_TEST
     // RTL8139 Phase 9: TCP data transfer. Primary: 10.0.2.2:8080 (host
     // listener started BEFORE QEMU; deterministic both-sides evidence).
     // Fallback ONLY on RST/timeout: DNS-over-TCP to 10.0.2.3:53 with 2-byte
@@ -603,6 +611,9 @@ void kernel_main(uint32_t magic, uint32_t mbi_addr) {
         serial_puts(tcp_established()?"ESTABLISHED (SYN/SYN-ACK/ACK complete)":"NOT established (timeout - see RX log above)");
         serial_puts("\n");
     }
+#else
+    serial_puts("TCP: boot test skipped (TCP_BOOT_TEST=0, define =1 to re-enable)\n");
+#endif
     int gui_tick = 0;
     int taskman_tick = 0;
     int last_clk_sec = -1; // taskbar clock 1Hz gate (elapsed seconds last drawn)
@@ -619,13 +630,19 @@ void kernel_main(uint32_t magic, uint32_t mbi_addr) {
         // RTL8139 deferred RX drain: parses packets queued by ROK IRQ once
         // their DMA has settled (>=1 PIT tick later). No-op when idle.
         rtl8139_poll_rx();
-        // Task Manager live refresh - every ~20 iterations (~0.5s) to update tick counts without constant redraw
-        // Chosen over every loop (60Hz full redraw = 180MB/s) to keep responsiveness, vs every second would be too laggy to watch counts climb
-        // Dynamic: find Task Manager by title, not hardcoded index 3 / count 4 (now boots with 2 windows)
+        // Task Manager + About live refresh - every ~20 iterations (~0.5s) to
+        // update tick counts / uptime without constant redraw (same 60Hz-frame
+        // cost reasoning as Task Manager: full redraw = 180MB/s). No new
+        // mechanism: About reuses Task Manager's periodic invalidate pattern.
+        // Dynamic: find by title, not hardcoded index (boots with 2 windows).
         if(++taskman_tick % 20 == 0){
             int tm = window_find_by_title("Task Manager");
             if(tm != -1 && !windows[tm].minimized && windows[tm].visible){
                 window_invalidate(tm); // TaskMan's own refresh: its bounds only
+            }
+            int ab = window_find_by_title("About");
+            if(ab != -1 && !windows[ab].minimized && windows[ab].visible){
+                window_invalidate(ab); // About's own refresh: its bounds only
             }
         }
         if(window_needs_redraw()){
